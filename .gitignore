@@ -5,6 +5,18 @@ Thumbs.db
 *.rar
 *.zip
 
+# Секреты пайплайна — API ключи 2GIS и т.п.
+.env
+.env.local
+
+# Рабочие артефакты scout/builder/tester агентов
+_data/.candidates.json
+_data/.verified.json
+_data/.scouted.json
+_data/.issue-body.md
+_data/.test-report.json
+_data/screenshots/
+
 # Vercel — игнорируем build output, но коммитим project.json для CI/CD
 .vercel/output/
 .vercel/.vc-config.json
