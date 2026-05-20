@@ -17,6 +17,14 @@ _data/.issue-body.md
 _data/.test-report.json
 _data/screenshots/
 
+# IG сессия — личные cookies/storage юзера (НЕ коммитить)
+_data/.ig-profile/
+_data/.ig-storage.json
+
+# Worktrees агентов и IDE
+.claude/worktrees/
+.idea/
+
 # Vercel — игнорируем build output, но коммитим project.json для CI/CD
 .vercel/output/
 .vercel/.vc-config.json
