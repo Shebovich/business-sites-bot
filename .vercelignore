@@ -1,0 +1,54 @@
+# Bot deployment — exclude everything except bot code + Vercel config
+# Each client site has its own .vercel/project.json — they deploy separately
+
+# Client sites (each has own Vercel project)
+u-fontana/
+na-dne/
+clever/
+bulbashy/
+sea-food-bar/
+sfb-minsk/
+rebrik-i-dranik/
+starye-tradicii/
+benedict-bistro/
+mon-nom/
+legendar/
+traktir-na-parkovoj/
+skif/
+storis/
+lidbeer/
+beryozka/
+zharynka/
+jerry/
+elva-optika/
+
+# Data
+_data/
+_verticals/
+_templates/
+
+# Dev artifacts
+node_modules/
+.git/
+.github/
+.claude/
+*.log
+.DS_Store
+
+# Tests + screenshots
+*test/
+playwright-report/
+test-results/
+
+# Memory + docs that aren't needed in deploy
+*.md
+!BOT_SETUP.md
+GRILL_ME_LOG.md
+PROJECT_OVERVIEW.md
+PIPELINE_RUN_001.md
+README.md
+CLAUDE.md
+
+# Configs
+.env.local
+.env.example
