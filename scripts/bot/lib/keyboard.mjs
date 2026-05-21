@@ -1,0 +1,60 @@
+// Inline keyboard builder for section navigation with progress counts.
+// See Q16.2 (UX: inline keyboard with progress + multi-input).
+
+import { InlineKeyboard } from 'grammy';
+import { SECTIONS } from '../config.mjs';
+import { countPhotos, getSkipped } from './state.mjs';
+
+// Build the main section keyboard for a task.
+// progress per section: "✅ 5/4", "3/4", "(нужно 1)", "⏭ skipped".
+export async function buildSectionKeyboard(issueNumber) {
+  const kb = new InlineKeyboard();
+  const skipped = new Set(await getSkipped(issueNumber));
+
+  for (const section of SECTIONS) {
+    const count = await countPhotos(issueNumber, section.id);
+    const label = renderSectionButton(section, count, skipped.has(section.id));
+    kb.text(label, `sec:${section.id}`).row();
+  }
+
+  kb.text('📝 Тексты', 'mode:texts').row();
+
+  // /done-all gate — only show when all required sections satisfied or skipped.
+  const ready = await isReadyForDoneAll(issueNumber, skipped);
+  if (ready) {
+    kb.text('✅ Готово, собирать', 'action:done_all').row();
+  }
+
+  kb.text('❌ Отмена', 'action:cancel');
+  return kb;
+}
+
+function renderSectionButton(section, count, isSkipped) {
+  const { emoji, label, min_count } = section;
+  if (isSkipped) return `${emoji} ${label} — ⏭ skipped`;
+  if (count >= min_count) return `${emoji} ${label} — ✅ ${count}/${min_count}`;
+  if (count > 0)          return `${emoji} ${label} — ${count}/${min_count}`;
+  return `${emoji} ${label} (нужно ${min_count})`;
+}
+
+async function isReadyForDoneAll(issueNumber, skippedSet) {
+  for (const s of SECTIONS) {
+    if (!s.required) continue;
+    if (skippedSet.has(s.id)) continue;
+    const c = await countPhotos(issueNumber, s.id);
+    if (c < s.min_count) return false;
+  }
+  return true;
+}
+
+// Keyboard for /list — one row per active task.
+export function buildTaskListKeyboard(activeTasks) {
+  const kb = new InlineKeyboard();
+  for (const t of activeTasks) {
+    const name = t.venue_name || t.slug || `issue-${t.issue_number}`;
+    const hasProgress = (t.sections_done != null) && (t.sections_required != null);
+    const suffix = hasProgress ? ` (${t.sections_done}/${t.sections_required})` : '';
+    kb.text(`📋 ${name} · #${t.issue_number}${suffix}`, `task:${t.issue_number}`).row();
+  }
+  return kb;
+}
