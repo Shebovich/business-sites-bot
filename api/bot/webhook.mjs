@@ -23,6 +23,75 @@ export const config = { api: { bodyParser: false } };
 // the same new chat_id pinged twice. Acceptable.
 const onboardingPinged = new Set();
 
+// setMyCommands is called once per cold-start so the TG slash-menu reflects
+// our current command list. Fire-and-forget — failures are non-fatal.
+let commandsRegistered = false;
+
+const COMMON_COMMANDS = [
+  { command: 'start',    description: 'Привет + статус' },
+  { command: 'help',     description: 'Команды (/help <команда> — детали)' },
+  { command: 'list',     description: 'Активные задачи' },
+  { command: 'current',  description: 'Текущая задача + секции' },
+  { command: 'preview',  description: 'Что собрано в задаче' },
+  { command: 'note',     description: 'Заметка к задаче' },
+  { command: 'notes',    description: 'Список заметок' },
+  { command: 'rm_note',  description: 'Удалить заметку N' },
+  { command: 'clear_notes', description: 'Очистить все заметки' },
+  { command: 'skip',     description: 'Пропустить секцию' },
+  { command: 'unskip',   description: 'Отменить skip' },
+  { command: 'rm',       description: 'Удалить N-ое фото из секции' },
+  { command: 'cancel',   description: 'Сбросить текущую задачу' },
+  { command: 'whoami',   description: 'Моя роль + chat_id' },
+  { command: 'playbook', description: 'Типовые сценарии для роли' },
+];
+
+const ASSISTANT_COMMANDS = [
+  ...COMMON_COMMANDS,
+  { command: 'submit',  description: 'Передать задачу owner на ревью' },
+  { command: 'scout',   description: 'Предложить лид (2GIS/IG/имя)' },
+];
+
+const OWNER_COMMANDS = [
+  ...COMMON_COMMANDS,
+  { command: 'done_all',     description: 'Собрать сайт (solo, автозапуск Actions)' },
+  { command: 'auto_photos',  description: 'Q14/Q15 auto-curation fallback' },
+  { command: 'owner_review', description: 'Submit\'ы ассистентов на ревью' },
+  { command: 'approve',      description: 'Одобрить submit → Actions rebuild' },
+  { command: 'approve_all',  description: 'Batch-approve всех + автосборка' },
+  { command: 'pitch_review', description: 'Батч-ревью готовых сайтов' },
+  { command: 'sold',         description: 'N [notes] — продано' },
+  { command: 'lost',         description: 'N [reason] — не сложилось' },
+  { command: 'ghosted',      description: 'N — клиент молчит' },
+  { command: 'scout',        description: 'Следующий лид или ad-hoc' },
+  { command: 'scout_review', description: 'Inbox новых scouted' },
+];
+
+async function registerCommandsOnce(token, ownerId, assistantIds) {
+  if (commandsRegistered) return;
+  commandsRegistered = true;
+  const call = (body) => fetch(`https://api.telegram.org/bot${token}/setMyCommands`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  }).then(r => r.json()).catch(e => ({ ok: false, description: e.message }));
+
+  // Defer to event loop so first webhook request returns fast.
+  setTimeout(async () => {
+    try {
+      await call({ commands: COMMON_COMMANDS, scope: { type: 'default' } });
+      if (ownerId) {
+        await call({ commands: OWNER_COMMANDS, scope: { type: 'chat', chat_id: Number(ownerId) } });
+      }
+      for (const id of assistantIds) {
+        await call({ commands: ASSISTANT_COMMANDS, scope: { type: 'chat', chat_id: Number(id) } });
+      }
+      console.log('[bot] setMyCommands registered for owner + assistants');
+    } catch (e) {
+      console.warn('[bot] setMyCommands failed (non-fatal):', e.message);
+    }
+  }, 100);
+}
+
 // Fail fast at module load if env is misconfigured. On Vercel this produces
 // a clear log entry instead of a cryptic runtime crash.
 let bot;
@@ -49,6 +118,9 @@ function getBot() {
   const OWNER_ID = getEnv('TG_OWNER_CHAT_ID') || '';
   const ASSISTANT_IDS = (getEnv('TG_ASSISTANT_CHAT_IDS') || '')
     .split(',').map(s => s.trim()).filter(Boolean);
+
+  // Fire-and-forget: refresh TG slash-menu on cold start.
+  registerCommandsOnce(getEnv('TG_BOT_TOKEN'), OWNER_ID, ASSISTANT_IDS);
 
   bot.use(async (ctx, next) => {
     const fromId = String(ctx.from?.id ?? '');

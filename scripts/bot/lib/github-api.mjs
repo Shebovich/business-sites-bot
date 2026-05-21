@@ -23,7 +23,11 @@ async function ghFetch(path, init = {}, { authRequired = false } = {}) {
     const body = await res.text();
     throw new Error(`GitHub API ${path}: ${res.status} ${body}`);
   }
-  return res.json();
+  // 204 No Content (e.g. workflow_dispatch) — no body. Empty body 200's also
+  // happen on PATCH operations that don't return content. JSON.parse('') throws.
+  if (res.status === 204) return {};
+  const text = await res.text();
+  return text ? JSON.parse(text) : {};
 }
 
 // Public repo read — works without token (60 req/hr anon limit, 5000/hr with token).
