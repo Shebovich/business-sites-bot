@@ -42,6 +42,8 @@ const K = {
   // ephemeral: owner has tapped [💬 Замечания] and the bot is waiting for the
   // next text message to forward as feedback. Stored per ownerId → issueNumber.
   feedbackPending:  (chatId) => `task:feedback_pending:${chatId}`,
+  // M3.1 — free-form notes per task. Each entry is JSON with section + text.
+  notes:            (issueNumber) => `task:${issueNumber}:notes`,
 };
 
 // ---- Current task --------------------------------------------------------
@@ -248,4 +250,45 @@ export async function removePhotoAt(issueNumber, section, oneBasedIdx) {
 
 export async function unskipSection(issueNumber, section) {
   await getRedis().srem(K.skipped(issueNumber), section);
+}
+
+// ---- M3.1: free-form notes (Q16.7 partial implementation) --------------
+// Each note has { text, section, added_at }. section is `null` for task-wide
+// notes (no active section at the time of writing). Notes are appended to a
+// list and never auto-deduplicated — assistant can write multiple instructions
+// per section over time, and we want to preserve the order for context.
+
+export async function addNote(issueNumber, section, text) {
+  const r = getRedis();
+  const entry = {
+    text: String(text).slice(0, 2000),  // cap each note at 2KB
+    section: section || null,
+    added_at: new Date().toISOString(),
+  };
+  await r.rpush(K.notes(issueNumber), JSON.stringify(entry));
+}
+
+export async function getNotes(issueNumber) {
+  const r = getRedis();
+  const raw = await r.lrange(K.notes(issueNumber), 0, -1);
+  return (raw || []).map(s => typeof s === 'string' ? JSON.parse(s) : s);
+}
+
+export async function removeNoteAt(issueNumber, oneBasedIdx) {
+  const r = getRedis();
+  const key = K.notes(issueNumber);
+  const raw = await r.lrange(key, 0, -1);
+  const list = (raw || []).map(s => typeof s === 'string' ? JSON.parse(s) : s);
+  const idx = oneBasedIdx - 1;
+  if (idx < 0 || idx >= list.length) return null;
+  const [removed] = list.splice(idx, 1);
+  await r.del(key);
+  if (list.length > 0) {
+    await r.rpush(key, ...list.map(o => JSON.stringify(o)));
+  }
+  return removed;
+}
+
+export async function clearNotes(issueNumber) {
+  await getRedis().del(K.notes(issueNumber));
 }

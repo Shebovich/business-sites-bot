@@ -6,7 +6,8 @@ import {
   handleStart, handleHelp, handleList, handleCurrent,
   handleSkip, handleCancel, handleDoneAll, handleAutoPhotos,
   handleSubmit, handleOwnerReview,
-  handleApprove, handlePreview, handleRm, handleUnskip,
+  handleApprove, handleApproveAll, handlePreview, handleRm, handleUnskip,
+  handleNote, handleNotes, handleRmNote, handleClearNotes,
   handleWhoami, handlePlaybook,
   handlePitchReview, handleSold, handleLost, handleGhosted,
   handleScout, handleScoutReview,
@@ -64,16 +65,17 @@ function getBot() {
         const username = ctx.from?.username ? `@${ctx.from.username}` : '(no username)';
         await ctx.reply(
           `👋 Привет. Я бот ревью сайтов Shebovich.\n\n` +
-          `Твой chat_id: \`${fromId}\`\n\n` +
+          `Твой chat_id: <code>${fromId}</code>\n\n` +
           `Перешли этот id Pavel — он добавит тебя в whitelist. Я тебя пока игнорю.`,
-          { parse_mode: 'Markdown' }
+          { parse_mode: 'HTML' }
         );
         if (OWNER_ID && !onboardingPinged.has(fromId)) {
           onboardingPinged.add(fromId);
+          const safeUsername = username.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
           await sendMessage(OWNER_ID,
-            `🔔 Новый chat_id хочет доступ:\n• ${username}\n• id \`${fromId}\`\n\n` +
-            `Добавь в \`TG_ASSISTANT_CHAT_IDS\` через Vercel env, потом redeploy.`,
-            { parse_mode: 'Markdown' }
+            `🔔 Новый chat_id хочет доступ:\n• ${safeUsername}\n• id <code>${fromId}</code>\n\n` +
+            `Добавь в <code>TG_ASSISTANT_CHAT_IDS</code> через Vercel env, потом redeploy.`,
+            { parse_mode: 'HTML' }
           ).catch(() => {});
         }
       } catch (e) {
@@ -92,12 +94,17 @@ function getBot() {
   bot.command('unskip',       handleUnskip);
   bot.command('preview',      handlePreview);
   bot.command('rm',           handleRm);
+  bot.command('note',         handleNote);
+  bot.command('notes',        handleNotes);
+  bot.command('rm_note',      handleRmNote);
+  bot.command('clear_notes',  handleClearNotes);
   bot.command('cancel',       handleCancel);
   bot.command('done_all',     handleDoneAll);
   bot.command('auto_photos',  handleAutoPhotos);
   bot.command('submit',       handleSubmit);
   bot.command('owner_review', handleOwnerReview);
   bot.command('approve',      handleApprove);
+  bot.command('approve_all',  handleApproveAll);
   bot.command('whoami',       handleWhoami);
   bot.command('playbook',     handlePlaybook);
   bot.command('pitch_review', handlePitchReview);

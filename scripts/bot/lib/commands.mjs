@@ -7,7 +7,8 @@ import { getCurrentTask, setCurrentTask, setActiveSection, getActiveSection,
          clearTaskState, getRound, incRound, getLastSubmitHash, setLastSubmitHash,
          getAssistantChatId, setAssistantChatId,
          getFeedbackPending, setFeedbackPending, clearFeedbackPending,
-         removePhotoAt, unskipSection } from './state.mjs';
+         removePhotoAt, unskipSection,
+         addNote, getNotes, removeNoteAt, clearNotes } from './state.mjs';
 import { buildTaskListKeyboard, buildSectionKeyboard,
          buildOwnerPushKeyboard, buildPreviewKeyboard } from './keyboard.mjs';
 import { SECTIONS, SECTION_BY_ID, LABELS, getEnv } from '../config.mjs';
@@ -49,17 +50,19 @@ export async function handleStart(ctx) {
 
 export async function handleHelp(ctx) {
   // Q32: role-aware + categorical + optional topic detail.
+  // HTML mode (Markdown v1 breaks on bare `_` in command names).
   const arg = ctx.match?.trim();
   if (arg) {
     const detail = renderTopicHelp(arg);
     if (detail) {
-      await ctx.reply(detail);
+      await ctx.reply(detail, { parse_mode: 'HTML' });
     } else {
-      await ctx.reply(`Не знаю команды \`${arg}\`. /help — общий список.`, { parse_mode: 'Markdown' });
+      await ctx.reply(`Не знаю команды <code>${escapeHtml(arg)}</code>. /help — общий список.`,
+        { parse_mode: 'HTML' });
     }
     return;
   }
-  await ctx.reply(renderHelp(ctx.role), { parse_mode: 'Markdown' });
+  await ctx.reply(renderHelp(ctx.role), { parse_mode: 'HTML' });
 }
 
 // M3c — Q29: debug command. Always responds even if env is broken.
@@ -68,14 +71,24 @@ export async function handleWhoami(ctx) {
   const username = ctx.from?.username ? `@${ctx.from.username}` : '(no username)';
   const role = ctx.role || 'unknown';
   await ctx.reply(
-    `Ты: ${username}\nchat_id: \`${id}\`\nРоль: ${role}`,
-    { parse_mode: 'Markdown' }
+    `Ты: ${escapeHtml(username)}\nchat_id: <code>${id}</code>\nРоль: ${role}`,
+    { parse_mode: 'HTML' }
   );
 }
 
 // M3c — Q33: role-aware playbook.
 export async function handlePlaybook(ctx) {
-  await ctx.reply(renderPlaybook(ctx.role), { parse_mode: 'Markdown' });
+  await ctx.reply(renderPlaybook(ctx.role), { parse_mode: 'HTML' });
+}
+
+// Minimal HTML escape for user-controlled strings interpolated into HTML-mode
+// messages. Only needed for `<`/`>`/`&`/`"` — TG HTML parser is otherwise
+// lenient (unlike MarkdownV2 which requires escaping a dozen chars).
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
 }
 
 // M3b — Q25/Q26/Q26.5: scout from bot.
@@ -404,10 +417,15 @@ export async function handleCurrent(ctx) {
     return;
   }
   const kb = await buildSectionKeyboard(task.issue_number);
-  await ctx.reply(
-    `📋 #${task.issue_number} ${task.slug}\nPreview: ${task.preview_url || '(будет после первого деплоя)'}`,
-    { reply_markup: kb }
-  );
+  const lines = [
+    `📋 #${task.issue_number} ${task.venue_name || task.slug}`,
+    `🔗 Посмотреть результат: ${task.preview_url || '(будет после первого деплоя)'}`,
+  ];
+  if (task.instagram) {
+    const handle = task.instagram.replace(/^@/, '');
+    lines.push(`📸 Instagram: ${task.instagram} (https://instagram.com/${handle})`);
+  }
+  await ctx.reply(lines.join('\n'), { reply_markup: kb });
 }
 
 export async function handleSkip(ctx) {
@@ -555,15 +573,14 @@ export async function handleApprove(ctx) {
 }
 
 // Shared between /approve command and `approve:N` callback.
-async function runApprove(ctx, issueNumber) {
-  // Resolve task meta — owner may not have it as current task. Pull from
-  // GH so we get the slug.
+// Returns { ok, slug, dispatched } so /approve_all can summarise.
+async function runApprove(ctx, issueNumber, { silent = false } = {}) {
   let issue;
   try {
     issue = await getIssue(issueNumber);
   } catch (e) {
-    await ctx.reply(`❌ Не нашёл issue #${issueNumber}: ${e.message}`);
-    return;
+    if (!silent) await ctx.reply(`❌ Не нашёл issue #${issueNumber}: ${e.message}`);
+    return { ok: false, error: e.message };
   }
   const slug = extractSlugFromIssue(issue);
   const task = {
@@ -573,17 +590,20 @@ async function runApprove(ctx, issueNumber) {
     html_url: issue.html_url,
   };
 
-  // Build input.json from Redis state (same as runRebuild).
-  await ctx.reply(`Принимаю #${issueNumber} \`${slug}\`. Коммичу input.json...`, { parse_mode: 'Markdown' });
+  if (!silent) {
+    await ctx.reply(`Принимаю #${issueNumber} <code>${slug}</code>. Коммичу input.json...`,
+      { parse_mode: 'HTML' });
+  }
   const ok = await commitInputAndFlipLabel({
     task,
     mode: 'manual',
     ctx,
     fromLabel: LABELS.AWAITING_OWNER_REVIEW,
+    silent,
   });
-  if (!ok) return;
+  if (!ok) return { ok: false, slug };
 
-  // Q22b: wipe Redis state immediately — repo input.json is the source of truth.
+  // Q22b: wipe Redis state immediately — repo input.json is source of truth.
   try {
     const removed = await clearTaskState(issueNumber);
     console.log(`[approve] cleared ${removed} Redis keys for task ${issueNumber}`);
@@ -608,16 +628,90 @@ async function runApprove(ctx, issueNumber) {
     const ownerName = ctx.from?.username ? `@${ctx.from.username}` : 'owner';
     const round = await getRound(issueNumber);
     await commentOnIssue(issueNumber,
-      `**Approved by ${ownerName} (round ${round || 1}). Awaiting Claude Code rebuild.**`
+      `**Approved by ${ownerName} (round ${round || 1}). Dispatching GH Actions rebuild.**`
     );
   } catch (e) {
     console.warn('[approve] commentOnIssue failed:', e.message);
   }
 
-  await ctx.reply(
-    `✅ Принято. Запусти на ноуте:\n\n  /process-tg-tasks\n\nClaude применит изменения, задеплоит, поставит \`built\`.`,
-    { parse_mode: 'Markdown' }
-  );
+  // Auto-dispatch GitHub Actions visual-review workflow — no laptop needed.
+  let dispatched = false;
+  try {
+    await dispatchWorkflow({
+      workflow: 'visual-review.yml',
+      inputs: { issue_number: String(issueNumber), slug },
+    });
+    dispatched = true;
+  } catch (e) {
+    console.error('[approve] dispatchWorkflow failed:', e.message);
+    if (!silent) {
+      await ctx.reply(
+        `⚠️ Approved, но не смог запустить GH Actions workflow: ${e.message}\n\n` +
+        `Fallback: запусти на ноуте <code>/process-tg-tasks</code>.`,
+        { parse_mode: 'HTML' }
+      );
+    }
+  }
+
+  if (!silent) {
+    if (dispatched) {
+      await ctx.reply(
+        `✅ Принято. GH Actions запущен — следи за прогрессом:\n` +
+        `https://github.com/Shebovich/business-sites/actions/workflows/visual-review.yml\n\n` +
+        `Когда сборка пройдёт, придёт push «#${issueNumber} обновлено» (label <code>built</code>).`,
+        { parse_mode: 'HTML' }
+      );
+    }
+  }
+  return { ok: true, slug, dispatched };
+}
+
+// /approve_all — batch approve every awaiting-owner-review submit + dispatch
+// workflows. After this command, GH Actions does the rebuild + deploy + label
+// update for every task autonomously. Claude Code на ноуте не нужен.
+export async function handleApproveAll(ctx) {
+  if (ctx.role !== 'owner') {
+    await ctx.reply('Только owner может делать batch-approve.');
+    return;
+  }
+  const tasks = await safeGetActiveTasks(LABELS.AWAITING_OWNER_REVIEW);
+  if (tasks.length === 0) {
+    await ctx.reply('Нет submit\'ов на approve. /list если хочешь посмотреть всё, что в работе.');
+    return;
+  }
+  await ctx.reply(`🚀 Batch approve: ${tasks.length} задач. Прохожусь по очереди...`);
+
+  const results = [];
+  for (const t of tasks) {
+    const res = await runApprove(ctx, t.issue_number, { silent: true });
+    results.push({ task: t, ...res });
+  }
+
+  const ok = results.filter(r => r.ok && r.dispatched);
+  const partial = results.filter(r => r.ok && !r.dispatched);
+  const failed = results.filter(r => !r.ok);
+
+  const lines = [`✅ Batch approve завершён.\n`];
+  if (ok.length > 0) {
+    lines.push(`<b>Отправлено в GH Actions (${ok.length}):</b>`);
+    for (const r of ok) lines.push(`• #${r.task.issue_number} ${r.task.venue_name || r.slug}`);
+    lines.push('');
+  }
+  if (partial.length > 0) {
+    lines.push(`<b>⚠️ Approved, но workflow не запустился (${partial.length}):</b>`);
+    for (const r of partial) lines.push(`• #${r.task.issue_number} ${r.task.venue_name || r.slug} — запусти /process-tg-tasks на ноуте`);
+    lines.push('');
+  }
+  if (failed.length > 0) {
+    lines.push(`<b>❌ Не получилось (${failed.length}):</b>`);
+    for (const r of failed) lines.push(`• #${r.task.issue_number}: ${r.error || 'unknown error'}`);
+    lines.push('');
+  }
+  if (ok.length > 0) {
+    lines.push(`Прогресс: https://github.com/Shebovich/business-sites/actions/workflows/visual-review.yml`);
+    lines.push(`Когда задача собрана — придёт push «обновлено».`);
+  }
+  await ctx.reply(lines.join('\n'), { parse_mode: 'HTML' });
 }
 
 // M3a — Q24.5: read-only summary of the current task. Same content as the
@@ -672,6 +766,67 @@ export async function handleRm(ctx) {
   await ctx.reply(`🗑 Удалено из ${sectionId}. Осталось: ${remaining.length}.`);
 }
 
+// M3.1: /note <текст> — добавить заметку к задаче (не привязана к секции).
+// Полезно когда хочешь оставить общий комментарий, не выбирая конкретную секцию.
+// Если активна секция — заметка привяжется к ней.
+export async function handleNote(ctx) {
+  const task = await getCurrentTask(ctx.from.id);
+  if (!task) { await ctx.reply('Нет текущей задачи. /list для выбора.'); return; }
+  const text = (ctx.match || '').trim();
+  if (!text) {
+    await ctx.reply('Использование: /note &lt;твой текст&gt;\n\nПример: /note приоритет hero и menu, остальное по возможности', { parse_mode: 'HTML' });
+    return;
+  }
+  const sectionId = await getActiveSection(ctx.from.id);
+  await addNote(task.issue_number, sectionId || null, text);
+  const where = sectionId ? `к секции ${sectionId}` : 'к задаче (общая)';
+  await ctx.reply(`📝 Заметка добавлена ${where}: «${truncatePreview(text)}»`);
+}
+
+// M3.1: /notes — показать все заметки текущей задачи (нумерованным списком).
+export async function handleNotes(ctx) {
+  const task = await getCurrentTask(ctx.from.id);
+  if (!task) { await ctx.reply('Нет текущей задачи. /list для выбора.'); return; }
+  const notes = await getNotes(task.issue_number);
+  if (notes.length === 0) {
+    await ctx.reply('Заметок пока нет. Пиши прямо в чат — всё, что без URL, попадёт в заметки.');
+    return;
+  }
+  const lines = [`📝 Заметки задачи #${task.issue_number} (${notes.length}):`, ''];
+  notes.forEach((n, i) => {
+    const where = n.section || 'общая';
+    lines.push(`<b>${i + 1}.</b> [${where}] ${escapeHtml(n.text)}`);
+  });
+  lines.push('', 'Удалить: /rm_note &lt;N&gt;\nОчистить все: /clear_notes');
+  await ctx.reply(lines.join('\n'), { parse_mode: 'HTML' });
+}
+
+// M3.1: /rm_note <N> — удалить заметку по индексу из /notes (1-based).
+export async function handleRmNote(ctx) {
+  const task = await getCurrentTask(ctx.from.id);
+  if (!task) { await ctx.reply('Нет текущей задачи. /list для выбора.'); return; }
+  const arg = (ctx.match || '').trim();
+  const n = Number(arg);
+  if (!Number.isInteger(n) || n < 1) {
+    await ctx.reply('Использование: /rm_note <N>. N — номер из /notes (1-based).');
+    return;
+  }
+  const removed = await removeNoteAt(task.issue_number, n);
+  if (!removed) {
+    await ctx.reply(`Заметки №${n} нет. /notes покажет актуальные.`);
+    return;
+  }
+  await ctx.reply(`🗑 Удалена заметка №${n}: «${truncatePreview(removed.text)}»`);
+}
+
+// M3.1: /clear_notes — снести все заметки задачи (фото/тексты не трогает).
+export async function handleClearNotes(ctx) {
+  const task = await getCurrentTask(ctx.from.id);
+  if (!task) { await ctx.reply('Нет текущей задачи. /list для выбора.'); return; }
+  await clearNotes(task.issue_number);
+  await ctx.reply('🗑 Все заметки задачи удалены.');
+}
+
 // M3a — Q24.5: /unskip <section> — отмена /skip.
 export async function handleUnskip(ctx) {
   const task = await getCurrentTask(ctx.from.id);
@@ -706,24 +861,41 @@ async function runRebuild(ctx, { mode }) {
   });
   if (!ok) return;
 
-  // Keep photo lists in case Claude Code run fails (legacy behaviour for
-  // /done_all). /approve cleans Redis explicitly via clearTaskState.
+  // Keep photo lists in case workflow fails — same as before.
   await setActiveSection(ctx.from.id, '');
 
-  await ctx.reply([
-    `✅ Input закоммичен, label обновлён на \`awaiting-claude-process\`.`,
-    ``,
-    `Открой Claude Code на компе и напиши:`,
-    `  /process-tg-tasks`,
-    ``,
-    `Claude применит изменения локально, задеплоит, поставит \`built\`.`,
-  ].join('\n'), { parse_mode: 'Markdown' });
+  // Auto-dispatch GH Actions — Claude Code на ноуте не нужен.
+  let dispatched = false;
+  try {
+    await dispatchWorkflow({
+      workflow: 'visual-review.yml',
+      inputs: { issue_number: String(task.issue_number), slug: task.slug },
+    });
+    dispatched = true;
+  } catch (e) {
+    console.error('[done_all] dispatchWorkflow failed:', e.message);
+  }
+
+  if (dispatched) {
+    await ctx.reply(
+      `✅ Input закоммичен, GH Actions запущен.\n\n` +
+      `Прогресс: https://github.com/Shebovich/business-sites/actions/workflows/visual-review.yml\n\n` +
+      `Когда сборка пройдёт, придёт push «обновлено» (label <code>built</code>).`,
+      { parse_mode: 'HTML' }
+    );
+  } else {
+    await ctx.reply(
+      `✅ Input закоммичен, label <code>awaiting-claude-process</code> поставлен, но workflow не запустился.\n\n` +
+      `Fallback: открой Claude Code на ноуте и напиши <code>/process-tg-tasks</code>.`,
+      { parse_mode: 'HTML' }
+    );
+  }
 }
 
 // Build input.json from Redis state, commit it to the repo, flip the label
-// to AWAITING_CLAUDE_PROCESS. Returns true on success, false on failure
-// (after replying to the user with the error).
-async function commitInputAndFlipLabel({ task, mode, ctx, fromLabel }) {
+// to AWAITING_CLAUDE_PROCESS. Returns true on success, false on failure.
+// In `silent` mode error replies are suppressed (caller does its own summary).
+async function commitInputAndFlipLabel({ task, mode, ctx, fromLabel, silent = false }) {
   const sectionsOut = {};
   for (const s of SECTIONS) {
     const files = await getPhotos(task.issue_number, s.id);
@@ -742,6 +914,17 @@ async function commitInputAndFlipLabel({ task, mode, ctx, fromLabel }) {
     if (e.field) text_edits[e.field] = e.new_value;
   }
   const skipped_sections = await getSkipped(task.issue_number);
+  const notes = await getNotes(task.issue_number);
+
+  // Attach section-scoped notes as `instructions` on each section so
+  // apply-fix.mjs and the Claude Code skill see them inline with the photos.
+  for (const note of notes) {
+    if (note.section && sectionsOut[note.section]) {
+      sectionsOut[note.section].instructions.push(note.text);
+    }
+  }
+  // Task-wide notes (no section) preserved separately.
+  const general_notes = notes.filter(n => !n.section).map(n => n.text);
 
   const inputJson = {
     issue_number: task.issue_number,
@@ -751,6 +934,7 @@ async function commitInputAndFlipLabel({ task, mode, ctx, fromLabel }) {
     sections: sectionsOut,
     text_edits,
     skipped_sections,
+    general_notes,
   };
 
   const path = `_data/${task.slug}/visual_review_input.json`;
@@ -764,7 +948,7 @@ async function commitInputAndFlipLabel({ task, mode, ctx, fromLabel }) {
     });
   } catch (e) {
     console.error('[rebuild] putFile failed:', e.message);
-    await ctx.reply(`❌ Не смог закоммитить input.json: ${e.message}`);
+    if (!silent) await ctx.reply(`❌ Не смог закоммитить input.json: ${e.message}`);
     return false;
   }
 
@@ -788,7 +972,9 @@ async function commitInputAndFlipLabel({ task, mode, ctx, fromLabel }) {
     catch { /* idempotent */ }
   } catch (e) {
     console.error('[rebuild] setLabel failed:', e.message);
-    await ctx.reply(`❌ Не смог поменять лейбл: ${e.message}\n\nInput JSON закоммичен — можно поменять лейбл вручную.`);
+    if (!silent) {
+      await ctx.reply(`❌ Не смог поменять лейбл: ${e.message}\n\nInput JSON закоммичен — можно поменять лейбл вручную.`);
+    }
     return false;
   }
   return true;
@@ -857,21 +1043,39 @@ export async function handleCallback(ctx) {
       slug: task.slug,
       venue_name: task.venue_name,
       html_url: task.html_url,
-      preview_url: `https://${task.slug}.vercel.app`,
+      preview_url: task.preview_url,
+      instagram: task.instagram,
     });
     // Reset active section — user must pick a section button next.
     await setActiveSection(ctx.from.id, '');
     const kb = await buildSectionKeyboard(task.issue_number);
-    await ctx.reply(
-      `📋 ${task.venue_name} · #${task.issue_number}\nPreview: https://${task.slug}.vercel.app\nIssue: ${task.html_url}\n\nВыбери секцию:`,
-      { reply_markup: kb }
-    );
+    const lines = [
+      `📋 ${task.venue_name} · #${task.issue_number}`,
+      `🔗 Посмотреть результат: ${task.preview_url}`,
+    ];
+    if (task.instagram) {
+      const handle = task.instagram.replace(/^@/, '');
+      lines.push(`📸 Instagram: ${task.instagram} (https://instagram.com/${handle})`);
+    }
+    lines.push(`📋 Issue: ${task.html_url}`);
+    lines.push('', 'Выбери секцию для загрузки фото/видео:');
+    await ctx.reply(lines.join('\n'), { reply_markup: kb });
     return;
   }
 
   if (data === 'mode:texts')      { await ctx.reply(STUB_M2); return; }
-  if (data === 'action:done_all') { await handleDoneAll(ctx); return; }
+  if (data === 'action:done_all') { await handleDoneAll(ctx); return; }  // legacy
   if (data === 'action:cancel')   { await handleCancel(ctx); return; }
+
+  // ✅ Готово — route by role: assistant /submit's, owner /done_all'ит solo.
+  if (data === 'action:submit') {
+    if (ctx.role === 'assistant') {
+      await handleSubmit(ctx);
+    } else {
+      await handleDoneAll(ctx);
+    }
+    return;
+  }
 
   // M3a — Q19/Q23: owner taps ✅ Approve in the submit push.
   if (data.startsWith('approve:')) {
@@ -1098,11 +1302,11 @@ export async function handleVideo(ctx) {
 }
 
 export async function handleText(ctx) {
-  const text = ctx.message?.text || '';
+  const text = (ctx.message?.text || '').trim();
+  if (!text) return;
 
-  // M3a — Q20: owner is responding to a [💬 Замечания] prompt.
-  // This branch takes precedence over the normal URL / text-edit routing
-  // because feedback can be plain text without a section context.
+  // M3a — Q20: owner is responding to a [💬 Замечания] prompt. Takes
+  // precedence over normal routing.
   if (ctx.role === 'owner') {
     const pendingIssue = await getFeedbackPending(ctx.from.id);
     if (pendingIssue) {
@@ -1114,11 +1318,22 @@ export async function handleText(ctx) {
   const task = await getCurrentTask(ctx.from.id);
   const sectionId = await getActiveSection(ctx.from.id);
 
-  // Try URL first.
+  if (!task) {
+    await ctx.reply('Открой задачу через /list — тогда я сохраню текст как заметку.');
+    return;
+  }
+
+  // URL + caption: save the URL as photo input AND the caption as a note so
+  // assistant's intent isn't lost ("вот фото меню, поставь его 1-м").
   const { url, caption } = splitUrlAndCaption(text);
   if (url) {
-    if (!task || !sectionId) {
-      await ctx.reply('URL принят, но нет активной секции. /current → выбери секцию.');
+    if (!sectionId) {
+      // URL без секции — сохраняем весь текст как общую заметку, не теряем.
+      await addNote(task.issue_number, null, text);
+      await ctx.reply(
+        `📝 Заметка сохранена без привязки к секции.\n\n` +
+        `Чтобы привязать к секции — /current → тапни секцию → пришли URL ещё раз.`
+      );
       return;
     }
     const res = await persistUrlInput({
@@ -1128,21 +1343,34 @@ export async function handleText(ctx) {
       caption,
     });
     if (res.ok) {
-      await ctx.reply(`🔗 ${res.type} сохранён в секции ${sectionId}.`);
+      const replyParts = [`🔗 ${res.type} сохранён в секции ${sectionId}.`];
+      if (caption && caption.length >= 3) {
+        await addNote(task.issue_number, sectionId, caption);
+        replyParts.push(`📝 Инструкция: «${truncatePreview(caption)}»`);
+      }
+      await ctx.reply(replyParts.join('\n'));
     } else {
-      await ctx.reply(`URL не распознан (${res.reason}). Поддерживаются IG post/reel/highlights и прямые image/video URL.`);
+      // URL не распознался — но текст ценный, сохраняем как заметку целиком.
+      await addNote(task.issue_number, sectionId, text);
+      await ctx.reply(
+        `📝 URL формат непривычный, сохранил весь текст как заметку к ${sectionId}.\n\n` +
+        `Поддерживаются автоматически: IG post/reel/highlights, прямые image/video URL.`
+      );
     }
     return;
   }
 
-  // Text-edit instruction?
-  const edit = parseTextEdit(text);
-  if (edit) {
-    await ctx.reply(STUB_M2);
-    return;
-  }
+  // Free-form text → note. Save to current section if one is active,
+  // otherwise as task-wide note.
+  await addNote(task.issue_number, sectionId || null, text);
+  const where = sectionId ? `к секции ${sectionId}` : 'к задаче (общая)';
+  await ctx.reply(`📝 Заметка добавлена ${where}: «${truncatePreview(text)}»`);
+}
 
-  await ctx.reply('Не распознал. Пришли IG-ссылку, фото/видео или используй /help.');
+function truncatePreview(s, limit = 100) {
+  if (!s) return '';
+  if (s.length <= limit) return s;
+  return s.slice(0, limit) + '…';
 }
 
 // ---- Safety wrappers ----------------------------------------------------
@@ -1154,26 +1382,69 @@ export async function handleText(ctx) {
 async function safeGetActiveTasks(label = LABELS.NEEDS_VISUAL_REVIEW) {
   try {
     const issues = await listIssuesByLabel(label);
-    return issues.map(i => {
-      // Slug — machine name (e.g. "skif"). Looks for body field first, then title.
-      const slugMatch = i.body?.match(/slug[:\s]+([a-z0-9-]+)/i)
-        ?? i.title?.match(/\[([a-z0-9-]+)\]/i);
-      // Venue name — strip "[label]" prefix and trailing "(description)".
-      // Title pattern observed: "[scouted] Jerry (шот-бар, Хмельницкого)" → "Jerry"
-      const venueName = i.title
-        .replace(/^\[[^\]]+\]\s*/, '')
-        .replace(/\s*\([^)]*\)\s*$/, '')
-        .trim();
-      return {
-        issue_number: i.number,
-        title: i.title,
-        venue_name: venueName || i.title,
-        slug: slugMatch?.[1] || `issue-${i.number}`,
-        html_url: i.html_url,
-      };
-    });
+    return issues.map(parseTaskFromIssue);
   } catch (e) {
     console.error('[bot] listIssuesByLabel failed:', e.message);
     return [];
   }
+}
+
+// Issue → task object. Extracts slug, venue_name, preview_url, instagram from
+// the bot-metadata block (preferred) and falls back to title/body parsing for
+// legacy issues.
+//
+// Bot metadata block format (prepended by scripts/bot/backfill-issue-meta.mjs):
+//   <!-- bot-metadata-v1 -->
+//   slug: skif
+//   preview: https://skif.vercel.app
+//   instagram: @skifcafe  (https://instagram.com/skifcafe)
+//   <!-- /bot-metadata-v1 -->
+function parseTaskFromIssue(i) {
+  const body = i.body || '';
+
+  // Slug: body `slug:` line, but NOT pseudo-slugs that match label tokens.
+  const RESERVED_SLUGS = new Set([
+    'scouted', 'needs', 'ready', 'awaiting', 'built', 'building',
+    'pitched', 'sold', 'lost', 'archived', 'rejected',
+  ]);
+  let slug = null;
+  const bodySlugMatch = body.match(/^\s*slug:\s*([a-z0-9-]+)/im);
+  if (bodySlugMatch && !RESERVED_SLUGS.has(bodySlugMatch[1].toLowerCase())) {
+    slug = bodySlugMatch[1];
+  }
+  if (!slug) {
+    // Legacy fallback — `[<slug>]` prefix in title. Reject reserved tokens
+    // so `[scouted] Skif` doesn't yield slug="scouted".
+    const titleMatch = i.title?.match(/\[([a-z0-9-]+)\]/i);
+    if (titleMatch && !RESERVED_SLUGS.has(titleMatch[1].toLowerCase())) {
+      slug = titleMatch[1];
+    }
+  }
+  if (!slug) slug = `issue-${i.number}`;
+
+  // Preview URL: explicit `preview:` line OR default `https://{slug}.vercel.app`.
+  const previewMatch = body.match(/^\s*preview:\s*(https?:\/\/\S+)/im);
+  const preview_url = previewMatch ? previewMatch[1] : `https://${slug}.vercel.app`;
+
+  // Instagram handle: `instagram:` line OR `**Instagram:**` markdown.
+  let instagram = null;
+  const igMatch = body.match(/^\s*instagram:\s*(@?[A-Za-z0-9_.]+)/im)
+    || body.match(/\*\*Instagram:\*\*\s*(@?[A-Za-z0-9_.]+)/i);
+  if (igMatch) instagram = igMatch[1].startsWith('@') ? igMatch[1] : `@${igMatch[1]}`;
+
+  // Venue name — strip "[label]" prefix and trailing "(description)".
+  const venueName = (i.title || '')
+    .replace(/^\[[^\]]+\]\s*/, '')
+    .replace(/\s*\([^)]*\)\s*$/, '')
+    .trim();
+
+  return {
+    issue_number: i.number,
+    title: i.title,
+    venue_name: venueName || i.title,
+    slug,
+    preview_url,
+    instagram,
+    html_url: i.html_url,
+  };
 }

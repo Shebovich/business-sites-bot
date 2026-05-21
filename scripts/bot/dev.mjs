@@ -11,7 +11,8 @@ import {
   handleStart, handleHelp, handleList, handleCurrent,
   handleSkip, handleCancel, handleDoneAll, handleAutoPhotos,
   handleSubmit, handleOwnerReview,
-  handleApprove, handlePreview, handleRm, handleUnskip,
+  handleApprove, handleApproveAll, handlePreview, handleRm, handleUnskip,
+  handleNote, handleNotes, handleRmNote, handleClearNotes,
   handleWhoami, handlePlaybook,
   handlePitchReview, handleSold, handleLost, handleGhosted,
   handleScout, handleScoutReview,
@@ -41,12 +42,17 @@ bot.command('skip',         handleSkip);
 bot.command('unskip',       handleUnskip);
 bot.command('preview',      handlePreview);
 bot.command('rm',           handleRm);
+bot.command('note',         handleNote);
+bot.command('notes',        handleNotes);
+bot.command('rm_note',      handleRmNote);
+bot.command('clear_notes',  handleClearNotes);
 bot.command('cancel',       handleCancel);
 bot.command('done_all',     handleDoneAll);
 bot.command('auto_photos',  handleAutoPhotos);
 bot.command('submit',       handleSubmit);
 bot.command('owner_review', handleOwnerReview);
 bot.command('approve',      handleApprove);
+bot.command('approve_all',  handleApproveAll);
 bot.command('whoami',       handleWhoami);
 bot.command('playbook',     handlePlaybook);
 bot.command('pitch_review', handlePitchReview);

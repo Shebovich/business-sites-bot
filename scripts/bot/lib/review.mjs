@@ -4,7 +4,7 @@
 
 import crypto from 'node:crypto';
 import { SECTIONS, SECTION_BY_ID } from '../config.mjs';
-import { getPhotos, getTextEdits, getSkipped } from './state.mjs';
+import { getPhotos, getTextEdits, getSkipped, getNotes } from './state.mjs';
 
 const TG_MESSAGE_LIMIT = 4096;
 const TEXT_PREVIEW_LIMIT = 150;
@@ -19,13 +19,14 @@ export async function collectSubmitState(issueNumber) {
   }
   const textEdits = await getTextEdits(issueNumber);
   const skipped = await getSkipped(issueNumber);
-  return { sections, textEdits, skipped };
+  const notes = await getNotes(issueNumber);
+  return { sections, textEdits, skipped, notes };
 }
 
 // SHA1 over the *content* of the submit, not the timestamps. Two /submit
 // calls without any change between them produce the same hash → Q24 rejects
 // the second one.
-export function hashSubmitState({ sections, textEdits, skipped }) {
+export function hashSubmitState({ sections, textEdits, skipped, notes }) {
   const fileTokens = [];
   for (const sectionId of Object.keys(sections).sort()) {
     for (const p of sections[sectionId]) {
@@ -39,6 +40,9 @@ export function hashSubmitState({ sections, textEdits, skipped }) {
     .map(e => `${e.field}=${e.new_value}`)
     .sort();
   const skippedTokens = [...skipped].sort();
+  // Notes are order-significant (sequence of instructions matters for context),
+  // so we hash them as-written, not sorted.
+  const noteTokens = (notes || []).map(n => `${n.section || '_'}|${n.text}`);
 
   const payload = [
     ...fileTokens.sort(),
@@ -46,6 +50,8 @@ export function hashSubmitState({ sections, textEdits, skipped }) {
     ...textTokens,
     '---skipped---',
     ...skippedTokens,
+    '---notes---',
+    ...noteTokens,
   ].join('\n');
   return crypto.createHash('sha1').update(payload).digest('hex');
 }
@@ -128,6 +134,19 @@ export function buildOwnerPush({ task, who, round, state }) {
     for (const e of urlEntries) {
       lines.push(`• ${truncate(e.url, 80)} → ${e.section}`);
     }
+  }
+
+  // Notes block — free-form text instructions grouped by section.
+  const notes = state.notes || [];
+  if (notes.length) {
+    lines.push('');
+    lines.push(`📝 Заметки (${notes.length}):`);
+    notes.forEach((n, idx) => {
+      const where = n.section
+        ? (SECTION_BY_ID[n.section]?.label || n.section)
+        : 'общая';
+      lines.push(`${idx + 1}. [${where}] ${truncate(n.text, 200)}`);
+    });
   }
 
   let body = lines.join('\n');

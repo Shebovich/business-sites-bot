@@ -38,3 +38,4 @@ _data/.ig-storage.json
 !**/.vercel/
 !**/.vercel/project.json
 .vercel
+.env*.local

@@ -19,11 +19,10 @@ export async function buildSectionKeyboard(issueNumber) {
 
   kb.text('📝 Тексты', 'mode:texts').row();
 
-  // /done-all gate — only show when all required sections satisfied or skipped.
-  const ready = await isReadyForDoneAll(issueNumber, skipped);
-  if (ready) {
-    kb.text('✅ Готово, собирать', 'action:done_all').row();
-  }
+  // Always show "Готово" — assistant /submits to owner, owner /done_all'ит solo.
+  // Hash check (Q24) + owner review catch empty/no-op submits, so we don't
+  // need to gate on photo counts here.
+  kb.text('✅ Готово', 'action:submit').row();
 
   kb.text('❌ Отмена', 'action:cancel');
   return kb;
@@ -35,16 +34,6 @@ function renderSectionButton(section, count, isSkipped) {
   if (count >= min_count) return `${emoji} ${label} — ✅ ${count}/${min_count}`;
   if (count > 0)          return `${emoji} ${label} — ${count}/${min_count}`;
   return `${emoji} ${label} (нужно ${min_count})`;
-}
-
-async function isReadyForDoneAll(issueNumber, skippedSet) {
-  for (const s of SECTIONS) {
-    if (!s.required) continue;
-    if (skippedSet.has(s.id)) continue;
-    const c = await countPhotos(issueNumber, s.id);
-    if (c < s.min_count) return false;
-  }
-  return true;
 }
 
 // Keyboard for /list — one row per active task.
