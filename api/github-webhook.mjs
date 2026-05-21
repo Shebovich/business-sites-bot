@@ -71,7 +71,15 @@ export default async function handler(req, res) {
     } else if (label === LABELS.BUILT) {
       await pushNotification(`✅ #${issue.number} обновлено, посмотри preview в issue: ${issue.html_url}`);
     } else if (label === LABELS.READY_FOR_PITCH) {
-      await pushNotification(`🎉 #${issue.number} готов, pitch в комменте: ${issue.html_url}`);
+      // M3c — Q30 quiet push: single line, no buttons. Batch review via /pitch_review.
+      await pushNotification(`🎉 #${issue.number} готов к pitch — /pitch_review`);
+    } else if (label === LABELS.SCOUTED) {
+      // M3b — Q27: push with approve buttons. Bot handles the callbacks.
+      const requested = extractRequestedBy(issue.body);
+      const author = requested ? ` (предложил ${requested})` : '';
+      await pushNotification(
+        `🔍 Новый лид #${issue.number}${author}\n\n${issue.title}\n${issue.html_url}\n\n/scout_review для approve.`
+      );
     }
   } catch (e) {
     console.error('[gh-webhook] handler error:', e.message);
@@ -84,6 +92,15 @@ function extractSlug(title) {
   // Issues are titled like "Скиф — нужен сайт" or "[slug] ..." — best-effort.
   const m = title.match(/\[([a-z0-9-]+)\]/i);
   return m ? m[1] : title.split(/\s+/)[0];
+}
+
+// Bot writes "Requested by @username via TG" in the issue body when an
+// assistant submits /scout. Pull that hint into the push so owner sees who
+// asked. Returns null if not present.
+function extractRequestedBy(body) {
+  if (!body) return null;
+  const m = body.match(/Requested by\s+([@\w-]+)/i);
+  return m ? m[1] : null;
 }
 
 async function pushNotification(text) {

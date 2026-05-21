@@ -65,6 +65,22 @@ export async function commentOnIssue(issueNumber, body) {
   }, { authRequired: true });
 }
 
+// M3c — used by /lost to close the issue after labelling.
+export async function closeIssue(issueNumber, { stateReason = 'not_planned' } = {}) {
+  return ghFetch(`/repos/${GITHUB_REPO}/issues/${issueNumber}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ state: 'closed', state_reason: stateReason }),
+  }, { authRequired: true });
+}
+
+// M3b — used by /scout: create new issue with given title/body/labels.
+export async function createIssue({ title, body, labels = [] }) {
+  return ghFetch(`/repos/${GITHUB_REPO}/issues`, {
+    method: 'POST',
+    body: JSON.stringify({ title, body, labels }),
+  }, { authRequired: true });
+}
+
 // ---- Contents API (commit one file via REST) ----------------------------
 // Used to ship `_data/{slug}/visual_review_input.json` from the bot webhook
 // straight into the repo so the GH Actions workflow can pick it up.

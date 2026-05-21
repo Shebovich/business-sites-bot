@@ -15,6 +15,14 @@ export const LABELS = {
   AWAITING_CLAUDE_PROCESS: 'awaiting-claude-process',
   // M2.5 — multi-user. Assistants /submit → owner reviews via /owner_review.
   AWAITING_OWNER_REVIEW: 'awaiting-owner-review',
+  // M3c — lifecycle after pitch (Q30, Q31)
+  PITCHED: 'pitched',
+  SOLD: 'sold',
+  LOST: 'lost',
+  // M3b — scout from bot (Q26, Q26.5)
+  AWAITING_SCOUT: 'awaiting-scout',
+  SCOUTED: 'scouted',
+  EXISTING_SITE_REPLACE: 'existing-site-replace',
 };
 
 // Sections a user can submit photos for. Each entry: id, label (RU display),

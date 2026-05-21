@@ -25,3 +25,9 @@ export async function getFileUrl(fileId) {
 export async function sendMessage(chatId, text, extra = {}) {
   return await tgApi('sendMessage', { chat_id: chatId, text, ...extra });
 }
+
+// `media` is an array of `{type, media, caption?}` — TG accepts up to 10 per
+// call. Caller is responsible for batching (see review.mjs buildGalleryBatches).
+export async function sendMediaGroup(chatId, media) {
+  return await tgApi('sendMediaGroup', { chat_id: chatId, media });
+}

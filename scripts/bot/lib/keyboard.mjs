@@ -60,3 +60,26 @@ export function buildTaskListKeyboard(activeTasks) {
   }
   return kb;
 }
+
+// M3a: actions under the owner push (Q19). Returns plain markup so the
+// review-helpers can stay TG-library-agnostic.
+export function buildOwnerPushKeyboard(issueNumber) {
+  return new InlineKeyboard()
+    .text('👁 Открыть фото', `gallery:${issueNumber}`)
+    .row()
+    .text('✅ Approve', `approve:${issueNumber}`)
+    .text('💬 Замечания', `feedback:${issueNumber}`);
+}
+
+// M3a: keyboard rendered next to /preview (Q24.5). Same review summary but
+// with per-section [🔍 Открыть] (lazy gallery scoped to one section). Edit
+// buttons for text fields will land with M3a stage 2 (text-edit flow). For
+// now we expose the section-scoped gallery — that's the most-asked-for
+// missing piece (assistant can't visually verify what they uploaded).
+export function buildPreviewKeyboard(issueNumber, sectionsWithPhotos) {
+  const kb = new InlineKeyboard();
+  for (const sectionId of sectionsWithPhotos) {
+    kb.text(`🔍 ${sectionId}`, `gallery:${issueNumber}:${sectionId}`).row();
+  }
+  return kb;
+}

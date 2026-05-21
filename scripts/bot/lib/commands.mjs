@@ -3,16 +3,29 @@
 // reply so the bot doesn't appear broken before the rest of the milestones land.
 
 import { getCurrentTask, setCurrentTask, setActiveSection, getActiveSection,
-         skipSection, clearCurrentTask, getPhotos, getTextEdits, getSkipped } from './state.mjs';
-import { buildTaskListKeyboard, buildSectionKeyboard } from './keyboard.mjs';
-import { SECTIONS, SECTION_BY_ID, LABELS } from '../config.mjs';
+         skipSection, clearCurrentTask, getPhotos, getTextEdits, getSkipped,
+         clearTaskState, getRound, incRound, getLastSubmitHash, setLastSubmitHash,
+         getAssistantChatId, setAssistantChatId,
+         getFeedbackPending, setFeedbackPending, clearFeedbackPending,
+         removePhotoAt, unskipSection } from './state.mjs';
+import { buildTaskListKeyboard, buildSectionKeyboard,
+         buildOwnerPushKeyboard, buildPreviewKeyboard } from './keyboard.mjs';
+import { SECTIONS, SECTION_BY_ID, LABELS, getEnv } from '../config.mjs';
 import { persistUrlInput, persistTgUpload } from './photo-handler.mjs';
 import { splitUrlAndCaption, parseTextEdit } from './text-parser.mjs';
+import { collectSubmitState, hashSubmitState, buildOwnerPush,
+         buildGalleryBatches } from './review.mjs';
+import { sendMessage, sendMediaGroup } from './tg-api.mjs';
+import { renderHelp, renderTopicHelp } from './help.mjs';
+import { renderPlaybook } from './playbook.mjs';
+import { parseScoutInput, buildScoutIssue } from './scout-parser.mjs';
+import { InlineKeyboard } from 'grammy';
 // Note: `dispatchWorkflow` kept imported as a dormant fallback (Q18.1).
 // If we revert from Claude Code executor to GH Actions, restore the call in
 // runRebuild() step 3 — no other changes needed.
 // eslint-disable-next-line no-unused-vars
-import { listIssuesByLabel, putFile, dispatchWorkflow, commentOnIssue, setLabel } from './github-api.mjs';
+import { listIssuesByLabel, putFile, dispatchWorkflow, commentOnIssue, setLabel,
+         getIssue, closeIssue, createIssue } from './github-api.mjs';
 
 const STUB_M2 = 'Эта команда появится в M2. Сейчас доступны: /start /help /list.';
 
@@ -35,32 +48,166 @@ export async function handleStart(ctx) {
 }
 
 export async function handleHelp(ctx) {
-  const isOwner = ctx.role === 'owner';
-  const lines = [
-    'Команды:',
-    '/start — приветствие + статус',
-    '/list — все активные задачи',
-    '/current — текущая открытая задача с inline-клавиатурой',
-    '/skip <section> — пропустить секцию',
-    '/cancel — выйти из текущей задачи без сохранения',
-  ];
-  if (isOwner) {
-    lines.push(
-      '/done_all — финализировать → коммит input.json + label awaiting-claude-process (owner)',
-      '/auto_photos — auto-curation fallback Q14/Q15 (owner)',
-      '/owner_review — очередь задач от ассистентов (owner)',
-    );
-  } else {
-    lines.push(
-      '/submit — передать задачу owner на ревью',
-    );
+  // Q32: role-aware + categorical + optional topic detail.
+  const arg = ctx.match?.trim();
+  if (arg) {
+    const detail = renderTopicHelp(arg);
+    if (detail) {
+      await ctx.reply(detail);
+    } else {
+      await ctx.reply(`Не знаю команды \`${arg}\`. /help — общий список.`, { parse_mode: 'Markdown' });
+    }
+    return;
   }
-  lines.push(
-    '/help — это сообщение',
-    '',
-    'В контексте секции: пришли IG-ссылку / фото / видео / текстовую инструкцию.',
+  await ctx.reply(renderHelp(ctx.role), { parse_mode: 'Markdown' });
+}
+
+// M3c — Q29: debug command. Always responds even if env is broken.
+export async function handleWhoami(ctx) {
+  const id = ctx.from?.id;
+  const username = ctx.from?.username ? `@${ctx.from.username}` : '(no username)';
+  const role = ctx.role || 'unknown';
+  await ctx.reply(
+    `Ты: ${username}\nchat_id: \`${id}\`\nРоль: ${role}`,
+    { parse_mode: 'Markdown' }
   );
-  await ctx.reply(lines.join('\n'));
+}
+
+// M3c — Q33: role-aware playbook.
+export async function handlePlaybook(ctx) {
+  await ctx.reply(renderPlaybook(ctx.role), { parse_mode: 'Markdown' });
+}
+
+// M3b — Q25/Q26/Q26.5: scout from bot.
+// /scout                — pull next from queue (deferred to Claude Code skill;
+//                         bot just nudges)
+// /scout <input>        — universal: 2GIS/Google/Yandex/IG/handle/name/own-site URL.
+//                         Creates shell issue with `awaiting-scout` label.
+// /scout queue          — read _data/scout_queue.json from GitHub (top 5).
+// /scout refresh        — leave a marker comment; actual scrape happens locally.
+export async function handleScout(ctx) {
+  const arg = (ctx.match || '').trim();
+
+  if (arg === 'queue') {
+    await replyScoutQueue(ctx);
+    return;
+  }
+  if (arg === 'refresh') {
+    await ctx.reply(
+      `🔁 Refresh — запусти на ноуте:\n\n` +
+      `  node scripts/scrape-venues.mjs --commit\n\n` +
+      `После коммита \`_data/scout_queue.json\` обновится, /scout будет тянуть свежие лиды.`,
+      { parse_mode: 'Markdown' }
+    );
+    return;
+  }
+
+  if (!arg) {
+    // No args — pull next item from queue.
+    await pullNextFromQueue(ctx);
+    return;
+  }
+
+  // Ad-hoc input — parse + create issue.
+  const parsed = parseScoutInput(arg);
+  if (parsed.kind === 'empty' || parsed.kind === 'unknown_url') {
+    await ctx.reply(
+      `Не понял input. Поддерживаю:\n` +
+      `• 2GIS URL\n• Google/Yandex Maps URL\n• Instagram URL или @handle\n` +
+      `• Свой сайт заведения (URL)\n• Просто название\n\n` +
+      `Пример: /scout https://2gis.by/minsk/firm/70000001234567890`
+    );
+    return;
+  }
+  const requesterName = ctx.from?.username ? `@${ctx.from.username}` : `id:${ctx.from?.id}`;
+  const issuePayload = buildScoutIssue({ parsed, requesterName, requesterRole: ctx.role });
+  try {
+    const created = await createIssue(issuePayload);
+    await ctx.reply(
+      `🔍 Заявка на скаут принята #${created.number}.\n\n` +
+      `Запусти на ноуте \`/process-tg-tasks\` — skill сверит, что это, и предложит к approve.`,
+      { parse_mode: 'Markdown' }
+    );
+  } catch (e) {
+    console.error('[scout] createIssue failed:', e.message);
+    await ctx.reply(`❌ Не смог создать issue: ${e.message}`);
+  }
+}
+
+async function pullNextFromQueue(ctx) {
+  // The queue file is shipped via scripts/scrape-venues.mjs commits. Bot reads
+  // it through the public raw URL — no auth needed for public repos.
+  const url = `https://raw.githubusercontent.com/Shebovich/business-sites/main/_data/scout_queue.json`;
+  let queue;
+  try {
+    const res = await fetch(url, { cache: 'no-store' });
+    if (!res.ok) throw new Error(`${res.status}`);
+    queue = await res.json();
+  } catch (e) {
+    await ctx.reply(
+      `Очередь пустая или недоступна (${e.message}).\n\n` +
+      `Запусти на ноуте \`node scripts/scrape-venues.mjs --commit\` — это сгенерит \`_data/scout_queue.json\`.`,
+      { parse_mode: 'Markdown' }
+    );
+    return;
+  }
+  if (!Array.isArray(queue) || queue.length === 0) {
+    await ctx.reply('Очередь пуста. /scout refresh для пополнения.');
+    return;
+  }
+  const next = queue[0];
+  const kb = new InlineKeyboard()
+    .text('✅ Да, скаутим', `scout_queue:take:${encodeURIComponent(next.id || next.name || '')}`)
+    .text('⏭ Следующий', `scout_queue:skip:0`);
+  await ctx.reply(
+    `Следующий лид:\n• ${next.name || '(no name)'}\n• ⭐ ${next.rating ?? '—'} (${next.review_count ?? '—'} отзывов)\n` +
+    `• ${next.address || '(no address)'}\n• 2GIS: ${next.url || '(no url)'}\n\nЗапустить scout?`,
+    { reply_markup: kb }
+  );
+}
+
+async function replyScoutQueue(ctx) {
+  const url = `https://raw.githubusercontent.com/Shebovich/business-sites/main/_data/scout_queue.json`;
+  try {
+    const res = await fetch(url, { cache: 'no-store' });
+    if (!res.ok) throw new Error(`${res.status}`);
+    const queue = await res.json();
+    if (!Array.isArray(queue) || queue.length === 0) {
+      await ctx.reply('Очередь пуста. /scout refresh для пополнения.');
+      return;
+    }
+    const top5 = queue.slice(0, 5);
+    const lines = [`Топ ${top5.length} в очереди:`];
+    top5.forEach((v, i) => {
+      lines.push(`${i + 1}. ${v.name || '(no name)'} · ⭐ ${v.rating ?? '—'}`);
+    });
+    await ctx.reply(lines.join('\n'));
+  } catch (e) {
+    await ctx.reply(`Очередь недоступна (${e.message}). /scout refresh — пополнить.`);
+  }
+}
+
+// M3b — Q27: scout review inbox.
+export async function handleScoutReview(ctx) {
+  if (ctx.role !== 'owner') {
+    await ctx.reply('Только owner может approve лиды. Ассистент — /scout {input} чтобы предложить.');
+    return;
+  }
+  const tasks = await safeGetActiveTasks(LABELS.SCOUTED);
+  if (tasks.length === 0) {
+    await ctx.reply('Нет лидов на approve. Когда scout-агент поставит `scouted`, появятся здесь.');
+    return;
+  }
+  await ctx.reply(`🔍 Лидов на approve: ${tasks.length}`);
+  for (const t of tasks) {
+    const name = t.venue_name || t.slug || `issue-${t.issue_number}`;
+    const kb = new InlineKeyboard()
+      .text('✅ Approve и начать', `scout_review:${t.issue_number}:approve`)
+      .text('⏭ Skip', `scout_review:${t.issue_number}:skip`)
+      .row()
+      .text('👁 Открыть issue', `scout_review:${t.issue_number}:open`);
+    await ctx.reply(`${name} · #${t.issue_number}\n${t.html_url}`, { reply_markup: kb });
+  }
 }
 
 export async function handleList(ctx) {
@@ -91,6 +238,145 @@ export async function handleList(ctx) {
   }
   const kb = buildTaskListKeyboard(tagged);
   await ctx.reply(`Активных задач: ${tagged.length}`, { reply_markup: kb });
+}
+
+// M3c — Q30: batch pitch review. Lists ready-for-pitch issues with per-issue
+// action buttons. Owner taps [✅ Pitched] / [🔄 Revise] / [⏭ Skip].
+export async function handlePitchReview(ctx) {
+  if (ctx.role !== 'owner') {
+    await ctx.reply('Только owner ревьюит готовые сайты.');
+    return;
+  }
+  const tasks = await safeGetActiveTasks(LABELS.READY_FOR_PITCH);
+  if (tasks.length === 0) {
+    await ctx.reply('Нет готовых сайтов на pitch. Когда builder поставит `ready-for-pitch`, увидишь здесь.');
+    return;
+  }
+  await ctx.reply(`🎉 Готово к pitch: ${tasks.length}`);
+  for (const t of tasks) {
+    const name = t.venue_name || t.slug || `issue-${t.issue_number}`;
+    const previewUrl = `https://${t.slug}.vercel.app`;
+    const kb = new InlineKeyboard()
+      .text('✅ Pitched', `pitch:${t.issue_number}:pitched`)
+      .text('🔄 Revise', `pitch:${t.issue_number}:revise`)
+      .text('⏭ Skip', `pitch:${t.issue_number}:skip`);
+    await ctx.reply(
+      `📋 ${name} · #${t.issue_number}\n${previewUrl}\nIssue: ${t.html_url}`,
+      { reply_markup: kb }
+    );
+  }
+}
+
+// M3c — Q31: lifecycle commands.
+//   /sold N [notes]   — pitched → sold
+//   /lost N [reason]  — pitched → lost, close issue
+//   /ghosted N        — alias for /lost N "ghosted, no response"
+
+export async function handleSold(ctx) {
+  if (ctx.role !== 'owner') {
+    await ctx.reply('Только owner может отмечать sold.');
+    return;
+  }
+  const { issueNumber, rest } = parseLifecycleArg(ctx.match);
+  if (!issueNumber) {
+    await ctx.reply('Использование: /sold <issue_number> [optional notes]');
+    return;
+  }
+  try {
+    await setLabel(issueNumber, LABELS.SOLD, LABELS.PITCHED);
+  } catch (e) {
+    await ctx.reply(`❌ setLabel failed: ${e.message}`);
+    return;
+  }
+  const ownerName = ctx.from?.username ? `@${ctx.from.username}` : 'owner';
+  const today = new Date().toISOString().slice(0, 10);
+  try {
+    await commentOnIssue(issueNumber,
+      `**Sold by ${ownerName} on ${today}.**${rest ? `\n\n${rest}` : ''}`
+    );
+  } catch (e) {
+    console.warn('[sold] commentOnIssue failed:', e.message);
+  }
+  try {
+    const assistantId = await getAssistantChatId(issueNumber);
+    if (assistantId) {
+      await sendMessage(assistantId, `💰 #${issueNumber} продан. Спасибо!`);
+    }
+  } catch (e) {
+    console.warn('[sold] assistant push failed:', e.message);
+  }
+  await ctx.reply(
+    `🎉 #${issueNumber} → \`sold\`.\n\nНе забудь: подключить домен клиента вместо vercel namespace, выставить счёт.`,
+    { parse_mode: 'Markdown' }
+  );
+}
+
+export async function handleLost(ctx) {
+  if (ctx.role !== 'owner') {
+    await ctx.reply('Только owner может отмечать lost.');
+    return;
+  }
+  const { issueNumber, rest } = parseLifecycleArg(ctx.match);
+  if (!issueNumber) {
+    await ctx.reply('Использование: /lost <issue_number> [optional reason]');
+    return;
+  }
+  await markLost(ctx, issueNumber, rest || 'no reason given');
+}
+
+export async function handleGhosted(ctx) {
+  if (ctx.role !== 'owner') {
+    await ctx.reply('Только owner может отмечать ghosted.');
+    return;
+  }
+  const arg = ctx.match?.trim();
+  const issueNumber = Number((arg || '').replace(/^#/, ''));
+  if (!Number.isFinite(issueNumber)) {
+    await ctx.reply('Использование: /ghosted <issue_number>');
+    return;
+  }
+  await markLost(ctx, issueNumber, 'ghosted — no response');
+}
+
+async function markLost(ctx, issueNumber, reason) {
+  try {
+    await setLabel(issueNumber, LABELS.LOST, LABELS.PITCHED);
+  } catch (e) {
+    await ctx.reply(`❌ setLabel failed: ${e.message}`);
+    return;
+  }
+  const ownerName = ctx.from?.username ? `@${ctx.from.username}` : 'owner';
+  const today = new Date().toISOString().slice(0, 10);
+  try {
+    await commentOnIssue(issueNumber,
+      `**Lost on ${today}** (by ${ownerName}).\n\nReason: ${reason}`
+    );
+  } catch (e) {
+    console.warn('[lost] commentOnIssue failed:', e.message);
+  }
+  // Close the issue — lost stays for history but doesn't clutter active queues.
+  try {
+    await closeIssue(issueNumber);
+  } catch (e) {
+    console.warn('[lost] closeIssue failed:', e.message);
+  }
+  try {
+    const assistantId = await getAssistantChatId(issueNumber);
+    if (assistantId) {
+      await sendMessage(assistantId, `❌ #${issueNumber} не сложилось. Спасибо за работу.`);
+    }
+  } catch (e) {
+    console.warn('[lost] assistant push failed:', e.message);
+  }
+  await ctx.reply(`#${issueNumber} → \`lost\` (issue closed).`, { parse_mode: 'Markdown' });
+}
+
+function parseLifecycleArg(match) {
+  const arg = (match || '').trim();
+  if (!arg) return { issueNumber: null, rest: '' };
+  const m = arg.match(/^#?(\d+)\s*(.*)$/);
+  if (!m) return { issueNumber: null, rest: '' };
+  return { issueNumber: Number(m[1]), rest: m[2].trim() };
 }
 
 // Owner-only queue of assistant submissions waiting for review.
@@ -138,6 +424,7 @@ export async function handleSkip(ctx) {
 
 export async function handleCancel(ctx) {
   await clearCurrentTask(ctx.from.id);
+  await clearFeedbackPending(ctx.from.id);
   await ctx.reply('Текущая задача сброшена.');
 }
 
@@ -160,8 +447,8 @@ export async function handleAutoPhotos(ctx) {
 }
 
 // Assistant flow: marks current task as ready for owner review.
-// Owner gets a push via the existing GitHub webhook → TG bridge when the
-// label flips to `awaiting-owner-review`.
+// M3a: also pushes the full content snapshot to owner with action buttons,
+// and rejects no-op resubmits via SHA-1 content hash (Q24).
 export async function handleSubmit(ctx) {
   if (ctx.role !== 'assistant') {
     await ctx.reply('Команда /submit — только для ассистентов. Owner финализирует через /done_all.');
@@ -172,6 +459,27 @@ export async function handleSubmit(ctx) {
     await ctx.reply('Нет текущей задачи. Открой /list и выбери одну.');
     return;
   }
+
+  // Q24: hash check. Identical content vs last submit → reject so assistant
+  // doesn't accidentally re-trigger after feedback without changing anything.
+  const state = await collectSubmitState(task.issue_number);
+  const hash = hashSubmitState(state);
+  const lastHash = await getLastSubmitHash(task.issue_number);
+  const round = await getRound(task.issue_number);
+  if (lastHash && lastHash === hash) {
+    await ctx.reply(
+      `⚠️ Состояние задачи не поменялось с предыдущего /submit.\n\n` +
+      `Если получил замечания от owner'а — внеси правки (отправь новое фото / удали /rm / поправь текст), потом снова /submit.`
+    );
+    return;
+  }
+
+  // Remember which assistant owns this submission so feedback push can find
+  // them later. Overwrites prior value if a different assistant takes over.
+  await setAssistantChatId(task.issue_number, ctx.from.id);
+
+  // Q20: roll label forward. Round counter increments now so the owner push
+  // shows the correct number.
   try {
     await setLabel(task.issue_number, LABELS.AWAITING_OWNER_REVIEW, LABELS.NEEDS_VISUAL_REVIEW);
   } catch (e) {
@@ -179,16 +487,207 @@ export async function handleSubmit(ctx) {
     await ctx.reply(`❌ Не смог поменять лейбл: ${e.message}`);
     return;
   }
+  const newRound = await incRound(task.issue_number);
+  await setLastSubmitHash(task.issue_number, hash);
+
   try {
     const who = ctx.from?.username ? `@${ctx.from.username}` : `assistant ${ctx.from?.id}`;
-    await commentOnIssue(task.issue_number, `${who} submitted for review (via TG bot).`);
+    await commentOnIssue(
+      task.issue_number,
+      `${who} submitted for review (round ${newRound}, via TG bot).`
+    );
   } catch (e) {
     console.warn('[submit] commentOnIssue failed:', e.message);
   }
-  await ctx.reply('✅ Задача передана. Owner получит уведомление.');
+
+  // Q19: push owner the full content snapshot + action buttons.
+  await sendOwnerPush(task, ctx, state, newRound);
+
+  await ctx.reply(`✅ Задача передана (раунд ${newRound}). Owner получит уведомление.`);
 }
 
-// Shared dispatcher — collects state, commits input JSON, fires workflow.
+// Q19 push. Falls back silently if TG_OWNER_CHAT_ID isn't configured — bot
+// remains usable in solo mode but owner won't see assistant submissions.
+async function sendOwnerPush(task, ctx, state, round) {
+  const ownerId = getEnv('TG_OWNER_CHAT_ID');
+  if (!ownerId) {
+    console.warn('[submit] TG_OWNER_CHAT_ID not set — skipping owner push');
+    return;
+  }
+  const who = ctx.from?.username ? `@${ctx.from.username}` : `Ассистент ${ctx.from?.id}`;
+  const body = buildOwnerPush({ task, who, round, state });
+  const kb = buildOwnerPushKeyboard(task.issue_number);
+  try {
+    await sendMessage(ownerId, body, { reply_markup: kb });
+  } catch (e) {
+    console.error('[submit] sendOwnerPush failed:', e.message);
+  }
+}
+
+// M3a — Q23: owner /approve. Same finalise path as /done_all but explicitly
+// scoped to a task that's currently `awaiting-owner-review`. Can be called
+// via inline button (`approve:N`) or `/approve N` text command.
+export async function handleApprove(ctx) {
+  if (ctx.role !== 'owner') {
+    await ctx.reply('Только owner может одобрять задачи. Ассистент — /submit.');
+    return;
+  }
+  // Source: callback `approve:N` (already routed via handleCallback) or
+  // command `/approve N`. When called from a command, ctx.match holds the arg.
+  const arg = ctx.match?.trim();
+  let issueNumber;
+  if (arg) {
+    issueNumber = Number(arg.replace(/^#/, ''));
+    if (!Number.isFinite(issueNumber)) {
+      await ctx.reply('Использование: /approve <issue_number>. Или тапни ✅ Approve в push-сообщении.');
+      return;
+    }
+  } else {
+    // No arg → use current task (less common path; usually owner taps button).
+    const task = await getCurrentTask(ctx.from.id);
+    if (!task) {
+      await ctx.reply('Использование: /approve <issue_number>. Или тапни ✅ Approve в push-сообщении.');
+      return;
+    }
+    issueNumber = task.issue_number;
+  }
+  await runApprove(ctx, issueNumber);
+}
+
+// Shared between /approve command and `approve:N` callback.
+async function runApprove(ctx, issueNumber) {
+  // Resolve task meta — owner may not have it as current task. Pull from
+  // GH so we get the slug.
+  let issue;
+  try {
+    issue = await getIssue(issueNumber);
+  } catch (e) {
+    await ctx.reply(`❌ Не нашёл issue #${issueNumber}: ${e.message}`);
+    return;
+  }
+  const slug = extractSlugFromIssue(issue);
+  const task = {
+    issue_number: issueNumber,
+    slug,
+    venue_name: extractVenueName(issue.title),
+    html_url: issue.html_url,
+  };
+
+  // Build input.json from Redis state (same as runRebuild).
+  await ctx.reply(`Принимаю #${issueNumber} \`${slug}\`. Коммичу input.json...`, { parse_mode: 'Markdown' });
+  const ok = await commitInputAndFlipLabel({
+    task,
+    mode: 'manual',
+    ctx,
+    fromLabel: LABELS.AWAITING_OWNER_REVIEW,
+  });
+  if (!ok) return;
+
+  // Q22b: wipe Redis state immediately — repo input.json is the source of truth.
+  try {
+    const removed = await clearTaskState(issueNumber);
+    console.log(`[approve] cleared ${removed} Redis keys for task ${issueNumber}`);
+  } catch (e) {
+    console.warn('[approve] clearTaskState failed:', e.message);
+  }
+
+  // Push back to assistant if known.
+  try {
+    const assistantId = await getAssistantChatId(issueNumber);
+    if (assistantId) {
+      const ownerName = ctx.from?.username ? `@${ctx.from.username}` : 'Pavel';
+      await sendMessage(assistantId,
+        `✅ ${ownerName} одобрил ${task.venue_name || slug} #${issueNumber}. Спасибо!`
+      );
+    }
+  } catch (e) {
+    console.warn('[approve] assistant push failed:', e.message);
+  }
+
+  try {
+    const ownerName = ctx.from?.username ? `@${ctx.from.username}` : 'owner';
+    const round = await getRound(issueNumber);
+    await commentOnIssue(issueNumber,
+      `**Approved by ${ownerName} (round ${round || 1}). Awaiting Claude Code rebuild.**`
+    );
+  } catch (e) {
+    console.warn('[approve] commentOnIssue failed:', e.message);
+  }
+
+  await ctx.reply(
+    `✅ Принято. Запусти на ноуте:\n\n  /process-tg-tasks\n\nClaude применит изменения, задеплоит, поставит \`built\`.`,
+    { parse_mode: 'Markdown' }
+  );
+}
+
+// M3a — Q24.5: read-only summary of the current task. Same content as the
+// owner push but sent to the caller. Useful for assistants to verify what
+// they've submitted before /submit.
+export async function handlePreview(ctx) {
+  const task = await getCurrentTask(ctx.from.id);
+  if (!task) {
+    await ctx.reply('Нет текущей задачи. /list для выбора.');
+    return;
+  }
+  const state = await collectSubmitState(task.issue_number);
+  const round = await getRound(task.issue_number);
+  const who = ctx.from?.username ? `@${ctx.from.username}` : `Ассистент ${ctx.from?.id}`;
+  const body = buildOwnerPush({ task, who, round: round || 1, state });
+  // Per-section gallery shortcuts for sections that have at least one item.
+  const sectionsWithPhotos = SECTIONS
+    .map(s => s.id)
+    .filter(id => (state.sections[id] || []).length > 0);
+  const kb = sectionsWithPhotos.length > 0
+    ? buildPreviewKeyboard(task.issue_number, sectionsWithPhotos)
+    : undefined;
+  await ctx.reply(body, kb ? { reply_markup: kb } : {});
+}
+
+// M3a — Q24.5: /rm <section> <N> — remove Nth photo from a section.
+export async function handleRm(ctx) {
+  const task = await getCurrentTask(ctx.from.id);
+  if (!task) { await ctx.reply('Нет текущей задачи. /list для выбора.'); return; }
+  const arg = (ctx.match || '').trim();
+  const parts = arg.split(/\s+/);
+  if (parts.length < 2) {
+    await ctx.reply('Использование: /rm <section_id> <N>. N — номер фото из /preview (1-based).');
+    return;
+  }
+  const [sectionId, nStr] = parts;
+  if (!SECTION_BY_ID[sectionId]) {
+    await ctx.reply(`Секция \`${sectionId}\` не найдена. Список — /current.`, { parse_mode: 'Markdown' });
+    return;
+  }
+  const n = Number(nStr);
+  if (!Number.isInteger(n) || n < 1) {
+    await ctx.reply('N должно быть положительным целым (1, 2, 3...).');
+    return;
+  }
+  const removed = await removePhotoAt(task.issue_number, sectionId, n);
+  if (!removed) {
+    await ctx.reply(`В секции \`${sectionId}\` нет элемента №${n}. Открой /preview.`, { parse_mode: 'Markdown' });
+    return;
+  }
+  const remaining = await getPhotos(task.issue_number, sectionId);
+  await ctx.reply(`🗑 Удалено из ${sectionId}. Осталось: ${remaining.length}.`);
+}
+
+// M3a — Q24.5: /unskip <section> — отмена /skip.
+export async function handleUnskip(ctx) {
+  const task = await getCurrentTask(ctx.from.id);
+  if (!task) { await ctx.reply('Нет текущей задачи. /list для выбора.'); return; }
+  const arg = ctx.match?.trim();
+  if (!arg || !SECTION_BY_ID[arg]) {
+    await ctx.reply('Использование: /unskip <section_id>. Список секций — /current.');
+    return;
+  }
+  await unskipSection(task.issue_number, arg);
+  await ctx.reply(`↩️ Секция ${arg} снова в работе.`);
+}
+
+// Shared dispatcher — collects state, commits input JSON, flips label.
+// Used by /done_all (owner solo) and /auto_photos. /approve has its own
+// wrapper since it operates on a non-current task and adds Redis cleanup.
 async function runRebuild(ctx, { mode }) {
   const task = await getCurrentTask(ctx.from.id);
   if (!task) {
@@ -199,7 +698,32 @@ async function runRebuild(ctx, { mode }) {
   const friendly = mode === 'auto' ? 'auto-curation (Q14/Q15)' : 'manual visual review';
   await ctx.reply(`Запускаю rebuild (${friendly}) для #${task.issue_number} \`${task.slug}\`...`, { parse_mode: 'Markdown' });
 
-  // Aggregate state across all sections.
+  const ok = await commitInputAndFlipLabel({
+    task,
+    mode,
+    ctx,
+    fromLabel: LABELS.NEEDS_VISUAL_REVIEW,
+  });
+  if (!ok) return;
+
+  // Keep photo lists in case Claude Code run fails (legacy behaviour for
+  // /done_all). /approve cleans Redis explicitly via clearTaskState.
+  await setActiveSection(ctx.from.id, '');
+
+  await ctx.reply([
+    `✅ Input закоммичен, label обновлён на \`awaiting-claude-process\`.`,
+    ``,
+    `Открой Claude Code на компе и напиши:`,
+    `  /process-tg-tasks`,
+    ``,
+    `Claude применит изменения локально, задеплоит, поставит \`built\`.`,
+  ].join('\n'), { parse_mode: 'Markdown' });
+}
+
+// Build input.json from Redis state, commit it to the repo, flip the label
+// to AWAITING_CLAUDE_PROCESS. Returns true on success, false on failure
+// (after replying to the user with the error).
+async function commitInputAndFlipLabel({ task, mode, ctx, fromLabel }) {
   const sectionsOut = {};
   for (const s of SECTIONS) {
     const files = await getPhotos(task.issue_number, s.id);
@@ -222,7 +746,7 @@ async function runRebuild(ctx, { mode }) {
   const inputJson = {
     issue_number: task.issue_number,
     slug: task.slug,
-    mode,                       // 'manual' | 'auto'
+    mode,
     timestamp: new Date().toISOString(),
     sections: sectionsOut,
     text_edits,
@@ -232,7 +756,6 @@ async function runRebuild(ctx, { mode }) {
   const path = `_data/${task.slug}/visual_review_input.json`;
   const content = JSON.stringify(inputJson, null, 2);
 
-  // Step 1: commit input.json to repo.
   try {
     await putFile({
       path,
@@ -240,12 +763,11 @@ async function runRebuild(ctx, { mode }) {
       message: `chore(${task.slug}): visual review input from TG bot (#${task.issue_number})`,
     });
   } catch (e) {
-    console.error('[done_all] putFile failed:', e.message);
+    console.error('[rebuild] putFile failed:', e.message);
     await ctx.reply(`❌ Не смог закоммитить input.json: ${e.message}`);
-    return;
+    return false;
   }
 
-  // Step 2: comment snapshot on issue (truncate huge payloads).
   try {
     const snippet = content.length > 8000 ? content.slice(0, 8000) + '\n…(truncated)' : content;
     await commentOnIssue(
@@ -253,38 +775,38 @@ async function runRebuild(ctx, { mode }) {
       `Visual review dispatched (mode: \`${mode}\`).\n\nInput:\n\`\`\`json\n${snippet}\n\`\`\``
     );
   } catch (e) {
-    console.warn('[done_all] commentOnIssue failed:', e.message);
+    console.warn('[rebuild] commentOnIssue failed:', e.message);
   }
 
-  // Step 3 (M2.5 — Q18.1 pivot): mark issue as ready for Claude Code processing.
-  // GitHub Actions workflow `visual-review.yml` remains as a dormant fallback
-  // (`dispatchWorkflow` import preserved) — to revert, restore the dispatch
-  // call here and remove the setLabel call below.
   try {
-    // Source label may be either NEEDS_VISUAL_REVIEW (owner direct) or
-    // AWAITING_OWNER_REVIEW (after assistant /submit). Try both.
-    await setLabel(task.issue_number, LABELS.AWAITING_CLAUDE_PROCESS, LABELS.NEEDS_VISUAL_REVIEW);
-    // Best-effort: also strip AWAITING_OWNER_REVIEW if present.
-    try { await setLabel(task.issue_number, LABELS.AWAITING_CLAUDE_PROCESS, LABELS.AWAITING_OWNER_REVIEW); }
-    catch { /* idempotent — label may already be removed */ }
+    await setLabel(task.issue_number, LABELS.AWAITING_CLAUDE_PROCESS, fromLabel);
+    // Also strip the other transient label if it's still present.
+    const otherLabel = fromLabel === LABELS.NEEDS_VISUAL_REVIEW
+      ? LABELS.AWAITING_OWNER_REVIEW
+      : LABELS.NEEDS_VISUAL_REVIEW;
+    try { await setLabel(task.issue_number, LABELS.AWAITING_CLAUDE_PROCESS, otherLabel); }
+    catch { /* idempotent */ }
   } catch (e) {
-    console.error('[done_all] setLabel failed:', e.message);
+    console.error('[rebuild] setLabel failed:', e.message);
     await ctx.reply(`❌ Не смог поменять лейбл: ${e.message}\n\nInput JSON закоммичен — можно поменять лейбл вручную.`);
-    return;
+    return false;
   }
+  return true;
+}
 
-  // Step 4: clear active section but keep photo lists in case Claude Code
-  // run fails and we want to re-trigger.
-  await setActiveSection(ctx.from.id, '');
+function extractSlugFromIssue(issue) {
+  const fromBody = issue.body?.match(/slug[:\s]+([a-z0-9-]+)/i);
+  if (fromBody) return fromBody[1];
+  const fromTitle = issue.title?.match(/\[([a-z0-9-]+)\]/i);
+  if (fromTitle) return fromTitle[1];
+  return `issue-${issue.number}`;
+}
 
-  await ctx.reply([
-    `✅ Input закоммичен, label обновлён на \`awaiting-claude-process\`.`,
-    ``,
-    `Открой Claude Code на компе и напиши:`,
-    `  /process-tg-tasks`,
-    ``,
-    `Claude применит изменения локально, задеплоит, поставит \`built\`.`,
-  ].join('\n'), { parse_mode: 'Markdown' });
+function extractVenueName(title) {
+  return (title || '')
+    .replace(/^\[[^\]]+\]\s*/, '')
+    .replace(/\s*\([^)]*\)\s*$/, '')
+    .trim();
 }
 
 // Maps a photo entry from Redis to a `<scheme>:<value>` ref understood by
@@ -350,6 +872,192 @@ export async function handleCallback(ctx) {
   if (data === 'mode:texts')      { await ctx.reply(STUB_M2); return; }
   if (data === 'action:done_all') { await handleDoneAll(ctx); return; }
   if (data === 'action:cancel')   { await handleCancel(ctx); return; }
+
+  // M3a — Q19/Q23: owner taps ✅ Approve in the submit push.
+  if (data.startsWith('approve:')) {
+    if (ctx.role !== 'owner') {
+      await ctx.reply('Только owner может одобрять задачи.');
+      return;
+    }
+    const issueNumber = Number(data.slice(8));
+    if (!Number.isFinite(issueNumber)) return;
+    await runApprove(ctx, issueNumber);
+    return;
+  }
+
+  // M3a — Q20: owner taps 💬 Замечания. Set state, ask for the comment.
+  if (data.startsWith('feedback:')) {
+    if (ctx.role !== 'owner') {
+      await ctx.reply('Только owner может оставлять замечания.');
+      return;
+    }
+    const issueNumber = Number(data.slice(9));
+    if (!Number.isFinite(issueNumber)) return;
+    await setFeedbackPending(ctx.from.id, issueNumber);
+    await ctx.reply(
+      `📝 Напиши замечания одним сообщением — отправлю ассистенту и сохраню в issue #${issueNumber}.\n\n` +
+      `Отмена — /cancel.`
+    );
+    return;
+  }
+
+  // M3b — Q27: scout_review actions. `scout_review:N:approve|skip|open`.
+  if (data.startsWith('scout_review:')) {
+    if (ctx.role !== 'owner') return;
+    const [, nStr, action] = data.split(':');
+    const issueNumber = Number(nStr);
+    if (!Number.isFinite(issueNumber)) return;
+    if (action === 'approve') {
+      try {
+        await setLabel(issueNumber, LABELS.NEEDS_VISUAL_REVIEW, LABELS.SCOUTED);
+        await ctx.reply(
+          `✅ #${issueNumber} approved → \`needs-visual-review\`. Появится в /list.`,
+          { parse_mode: 'Markdown' }
+        );
+      } catch (e) {
+        await ctx.reply(`❌ setLabel failed: ${e.message}`);
+      }
+    } else if (action === 'skip') {
+      await ctx.reply(`⏭ #${issueNumber} пропущен в обзоре.`);
+    } else if (action === 'open') {
+      // Just provide a clickable link — TG renders it.
+      await ctx.reply(`https://github.com/Shebovich/business-sites/issues/${issueNumber}`);
+    }
+    return;
+  }
+
+  // M3b — /scout queue picker. `scout_queue:take:<id>` / `scout_queue:skip:<idx>`.
+  if (data.startsWith('scout_queue:')) {
+    const [, action, payload] = data.split(':');
+    if (action === 'take') {
+      const decoded = decodeURIComponent(payload || '');
+      await ctx.reply(
+        `🔍 Запусти на ноуте:\n\n` +
+        `  node scripts/scrape-venues.mjs --pick "${decoded}"\n\n` +
+        `Или просто \`/process-tg-tasks\` — skill подтянет первый из \`_data/scout_queue.json\`.`,
+        { parse_mode: 'Markdown' }
+      );
+    } else if (action === 'skip') {
+      await ctx.reply('⏭ Пропустили. Запусти /scout ещё раз — покажу следующий.');
+    }
+    return;
+  }
+
+  // M3c — Q30: pitch_review batch action. `pitch:N:pitched|revise|skip`.
+  if (data.startsWith('pitch:')) {
+    if (ctx.role !== 'owner') return;
+    const [, nStr, action] = data.split(':');
+    const issueNumber = Number(nStr);
+    if (!Number.isFinite(issueNumber)) return;
+    if (action === 'pitched') {
+      try {
+        await setLabel(issueNumber, LABELS.PITCHED, LABELS.READY_FOR_PITCH);
+        await ctx.reply(`✅ #${issueNumber} → \`pitched\`. Ждём ответа клиента — потом /sold или /lost.`,
+          { parse_mode: 'Markdown' });
+      } catch (e) {
+        await ctx.reply(`❌ setLabel failed: ${e.message}`);
+      }
+    } else if (action === 'revise') {
+      try {
+        await setLabel(issueNumber, LABELS.NEEDS_VISUAL_REVIEW, LABELS.READY_FOR_PITCH);
+        await ctx.reply(`🔄 #${issueNumber} → \`needs-visual-review\`. Сбрось Redis вручную если нужно.`,
+          { parse_mode: 'Markdown' });
+      } catch (e) {
+        await ctx.reply(`❌ setLabel failed: ${e.message}`);
+      }
+    } else if (action === 'skip') {
+      await ctx.reply(`⏭ #${issueNumber} пропущен в этом обзоре.`);
+    }
+    return;
+  }
+
+  // M3a — Q22: lazy gallery. `gallery:N` = whole task; `gallery:N:section` = scoped.
+  if (data.startsWith('gallery:')) {
+    const rest = data.slice(8);
+    const [nStr, sectionId] = rest.split(':');
+    const issueNumber = Number(nStr);
+    if (!Number.isFinite(issueNumber)) return;
+    await runGallery(ctx, issueNumber, sectionId || null);
+    return;
+  }
+}
+
+// Q22: pull photos from Redis, send as TG sendMediaGroup batches. If
+// `sectionFilter` is set, scope to just that section (used by /preview).
+async function runGallery(ctx, issueNumber, sectionFilter) {
+  const state = await collectSubmitState(issueNumber);
+  const scoped = sectionFilter
+    ? { sections: { [sectionFilter]: state.sections[sectionFilter] || [] }, textEdits: [], skipped: [] }
+    : state;
+  const { batches, placeholders } = buildGalleryBatches(scoped);
+  if (batches.length === 0 && placeholders.length === 0) {
+    await ctx.reply(sectionFilter
+      ? `В секции \`${sectionFilter}\` пока ничего нет.`
+      : `Для #${issueNumber} пока ничего не загружено.`,
+      { parse_mode: 'Markdown' });
+    return;
+  }
+  for (const batch of batches) {
+    try {
+      await sendMediaGroup(ctx.chat.id, batch);
+    } catch (e) {
+      console.warn('[gallery] sendMediaGroup failed:', e.message);
+      await ctx.reply(`⚠️ Не смог отправить часть медиа: ${e.message}`);
+    }
+  }
+  if (placeholders.length > 0) {
+    const lines = ['🔗 Ссылки (TG не может превьюшнуть, ждут rebuild):'];
+    lines.push(...placeholders.map(p => `• ${p}`));
+    await ctx.reply(lines.join('\n'));
+  }
+}
+
+// Q20: owner sent feedback text after tapping [💬 Замечания].
+// Posts as GitHub issue comment (audit trail), pushes to assistant, rolls
+// label back to `needs-visual-review` so the task reappears in assistant's /list.
+async function runFeedback(ctx, issueNumber, text) {
+  await clearFeedbackPending(ctx.from.id);
+  if (!text || text.trim().length < 3) {
+    await ctx.reply('Замечание слишком короткое. Отправь повторно — /preview сначала.');
+    return;
+  }
+
+  const round = await getRound(issueNumber);
+  const ownerName = ctx.from?.username ? `@${ctx.from.username}` : 'owner';
+
+  try {
+    await commentOnIssue(issueNumber,
+      `**Owner feedback (round ${round || 1}) from ${ownerName}:**\n\n${text}`
+    );
+  } catch (e) {
+    console.warn('[feedback] commentOnIssue failed:', e.message);
+  }
+
+  try {
+    await setLabel(issueNumber, LABELS.NEEDS_VISUAL_REVIEW, LABELS.AWAITING_OWNER_REVIEW);
+  } catch (e) {
+    console.error('[feedback] setLabel rollback failed:', e.message);
+    await ctx.reply(`⚠️ Не смог откатить лейбл: ${e.message}. Коммент оставлен, передай ассистенту вручную.`);
+    return;
+  }
+
+  try {
+    const assistantId = await getAssistantChatId(issueNumber);
+    if (assistantId) {
+      await sendMessage(assistantId,
+        `💬 ${ownerName} оставил замечания по #${issueNumber} (раунд ${round || 1}):\n\n${text}\n\n` +
+        `Внеси правки и снова /submit. Issue: ` +
+        `https://github.com/Shebovich/business-sites/issues/${issueNumber}`
+      );
+    } else {
+      console.warn(`[feedback] no assistant_chat_id for issue ${issueNumber}`);
+    }
+  } catch (e) {
+    console.warn('[feedback] assistant push failed:', e.message);
+  }
+
+  await ctx.reply(`✅ Замечания отправлены ассистенту, лейбл откатил на \`needs-visual-review\`.`,
+    { parse_mode: 'Markdown' });
 }
 
 export async function handlePhoto(ctx) {
@@ -391,6 +1099,18 @@ export async function handleVideo(ctx) {
 
 export async function handleText(ctx) {
   const text = ctx.message?.text || '';
+
+  // M3a — Q20: owner is responding to a [💬 Замечания] prompt.
+  // This branch takes precedence over the normal URL / text-edit routing
+  // because feedback can be plain text without a section context.
+  if (ctx.role === 'owner') {
+    const pendingIssue = await getFeedbackPending(ctx.from.id);
+    if (pendingIssue) {
+      await runFeedback(ctx, Number(pendingIssue), text);
+      return;
+    }
+  }
+
   const task = await getCurrentTask(ctx.from.id);
   const sectionId = await getActiveSection(ctx.from.id);
 
