@@ -161,9 +161,91 @@ gh secret set VERCEL_TOKEN -R Shebovich/business-sites  # уже стоит (и�
 
 Если что-то сломалось — input.json остаётся в репо, можно запустить workflow вручную из Actions tab.
 
+## 10. M2.5 — Claude Code executor + multi-user
+
+### Зачем
+
+Раньше `/done_all` триггерил GitHub Actions workflow `visual-review.yml` (Q16.4).
+Слабые места: задержка ~2-3 минуты на cold-start runner'а, fix-loop'ы через
+git push, нет интерактивной видимости. Решение (Q18.1) — **Claude Code на
+ноуте** = primary executor. Actions yaml сохранён как dormant fallback.
+
+После `/done_all`:
+1. Бот коммитит `_data/{slug}/visual_review_input.json` в репо
+2. Бот меняет лейбл `needs-visual-review` → `awaiting-claude-process`
+3. Юзер открывает Claude Code и пишет `обработай задачи из бота`
+4. Skill `process-tg-tasks` забирает все issues с этим лейблом, скачивает
+   фото, применяет `apply-fix`, деплоит, ставит `built`, шлёт TG
+
+### Multi-user (owner + assistants)
+
+Бот теперь поддерживает несколько whitelist'ов с разными ролями (Q16.5 v2):
+
+- **owner** — Pavel, может всё (`/done_all`, `/auto_photos`, `/owner_review`)
+- **assistant** — друг/коллега, может только собирать input (`/submit`)
+
+#### Добавить ассистента
+
+1. Друг открывает https://t.me/userinfobot → `/start` → копирует свой `Id`
+2. Он пишет тебе этот Id (в Telegram / любым каналом)
+3. Ты добавляешь в env var (comma-separated):
+   ```powershell
+   echo "FRIEND_CHAT_ID,ANOTHER_FRIEND_ID" | vercel env add TG_ASSISTANT_CHAT_IDS production
+   vercel --prod --yes  # redeploy чтобы новый env подтянулся
+   ```
+4. Можно несколько ассистентов через запятую. Пустое значение / отсутствие
+   переменной = ассистентов нет (только owner).
+
+#### Daily workflow
+
+1. **Assistant** работает в боте: тапает секцию, шлёт фото/URL/тексты.
+2. Когда собрал — жмёт `/submit`. Лейбл issue меняется на `awaiting-owner-review`.
+3. **Owner** получает push (через GitHub webhook → TG) что задача на ревью.
+4. Owner смотрит очередь: `/owner_review` (или `/list` — задачи с иконкой 🔵).
+5. Тапает задачу → видит секции с собранными фото. Может добавить своё или
+   сразу `/done_all`.
+6. `/done_all` коммитит input + ставит `awaiting-claude-process`.
+7. Owner на ноуте: открывает Claude Code → пишет `обработай задачи из бота`
+   → skill `process-tg-tasks` отрабатывает всё в очереди.
+
+### Перед запуском skill'а на новом ноуте
+
+```powershell
+node scripts/bot/pull-env.mjs   # тянет .env с Vercel
+# теперь можно вызывать /process-tg-tasks из Claude Code
+```
+
+### Лейблы (новые в M2.5)
+
+- `awaiting-claude-process` — input.json готов, ждёт локального запуска skill'а
+- `awaiting-owner-review` — ассистент сделал /submit, ждёт owner'а
+
+Регистрация через gh CLI (выполнить один раз):
+```powershell
+gh label create awaiting-claude-process -R Shebovich/business-sites `
+  --color "FFA500" --description "Bot input ready, waiting for Claude Code local processing"
+gh label create awaiting-owner-review -R Shebovich/business-sites `
+  --color "1D76DB" --description "Assistant submitted, owner needs to review/finalize"
+```
+
+### Откат к GitHub Actions
+
+Если Claude Code executor не зайдёт — флипнуть обратно:
+1. В `scripts/bot/lib/commands.mjs:runRebuild` восстановить вызов
+   `dispatchWorkflow({ workflow: 'visual-review.yml', ... })` вместо
+   `setLabel(..., AWAITING_CLAUDE_PROCESS, ...)`.
+2. Обновить текст reply в `/done_all` обратно на "Workflow запущен".
+3. Передеплоить.
+
+Workflow yaml остаётся в `.github/workflows/visual-review.yml` без изменений.
+
 ## Troubleshooting
 
-- **Бот молчит:** проверь `TG_OWNER_CHAT_ID` — бот игнорирует не-владельца.
+- **Бот молчит:** проверь `TG_OWNER_CHAT_ID` (или, если ты ассистент —
+  что Pavel добавил твой id в `TG_ASSISTANT_CHAT_IDS`).
 - **`getWebhookInfo` показывает last_error:** обычно проблема с env vars в Vercel. Глянь логи `vercel logs` для `/api/bot/webhook`.
 - **GitHub webhook 401:** secret не совпадает между Vercel env и GitHub Settings.
 - **Upstash connection error:** REST URL должен начинаться с `https://`, токен — длинная base64-строка.
+- **`/process-tg-tasks` не находит задачи:** проверь лейбл `awaiting-claude-process` на issue (а не `needs-visual-review` — это до `/done_all`).
+- **Skill падает на gh CLI:** перед запуском в PowerShell подтяни PATH:
+  `$env:PATH = [System.Environment]::GetEnvironmentVariable("PATH","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("PATH","User")`.

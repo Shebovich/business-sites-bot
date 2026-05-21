@@ -37,3 +37,4 @@ _data/.ig-storage.json
 # Разрешаем project.json во всех подпапках (нужен для GitHub Actions)
 !**/.vercel/
 !**/.vercel/project.json
+.vercel

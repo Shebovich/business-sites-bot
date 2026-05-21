@@ -1,1 +1,18 @@
-{"name":"business-sites","version":"1.0.0","private":true,"type":"module","devDependencies":{"@playwright/test":"^1.60.0"},"dependencies":{"js-yaml":"^4.1.1"}}
+{
+  "name": "business-sites",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "bot:set-webhook": "node scripts/bot/set-webhook.mjs",
+    "bot:dev": "node scripts/bot/dev.mjs"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.60.0"
+  },
+  "dependencies": {
+    "@upstash/redis": "^1.34.3",
+    "grammy": "^1.30.0",
+    "js-yaml": "^4.1.1"
+  }
+}

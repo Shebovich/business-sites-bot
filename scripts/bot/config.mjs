@@ -10,6 +10,11 @@ export const LABELS = {
   BUILT: 'built',
   READY_FOR_PITCH: 'ready-for-pitch',
   AWAITING_PHOTOS: 'awaiting-photos',
+  // M2.5 — Claude Code executor pivot (Q18.1).
+  // Bot commits input.json + sets this label; Claude Code skill picks them up.
+  AWAITING_CLAUDE_PROCESS: 'awaiting-claude-process',
+  // M2.5 — multi-user. Assistants /submit → owner reviews via /owner_review.
+  AWAITING_OWNER_REVIEW: 'awaiting-owner-review',
 };
 
 // Sections a user can submit photos for. Each entry: id, label (RU display),

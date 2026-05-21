@@ -48,13 +48,15 @@ async function isReadyForDoneAll(issueNumber, skippedSet) {
 }
 
 // Keyboard for /list — one row per active task.
+// `_icon` overrides the default 📋 (used to flag `awaiting-owner-review` as 🔵).
 export function buildTaskListKeyboard(activeTasks) {
   const kb = new InlineKeyboard();
   for (const t of activeTasks) {
     const name = t.venue_name || t.slug || `issue-${t.issue_number}`;
     const hasProgress = (t.sections_done != null) && (t.sections_required != null);
     const suffix = hasProgress ? ` (${t.sections_done}/${t.sections_required})` : '';
-    kb.text(`📋 ${name} · #${t.issue_number}${suffix}`, `task:${t.issue_number}`).row();
+    const icon = t._icon || '📋';
+    kb.text(`${icon} ${name} · #${t.issue_number}${suffix}`, `task:${t.issue_number}`).row();
   }
   return kb;
 }

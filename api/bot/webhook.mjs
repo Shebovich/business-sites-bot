@@ -5,6 +5,7 @@ import { Bot, webhookCallback } from 'grammy';
 import {
   handleStart, handleHelp, handleList, handleCurrent,
   handleSkip, handleCancel, handleDoneAll, handleAutoPhotos,
+  handleSubmit, handleOwnerReview,
   handleCallback, handlePhoto, handleVideo, handleText,
 } from '../../scripts/bot/lib/commands.mjs';
 import { assertEnv, getEnv } from '../../scripts/bot/config.mjs';
@@ -31,25 +32,36 @@ function getBot() {
     },
   });
 
-  // Single-user whitelist (Q16.5).
+  // Multi-user whitelist with roles (M2.5 — updated Q16.5).
+  // OWNER = Pavel (full access). ASSISTANTS = comma-separated chat_ids in env;
+  // can collect input but cannot finalise — must /submit for owner review.
+  const OWNER_ID = getEnv('TG_OWNER_CHAT_ID') || '';
+  const ASSISTANT_IDS = (getEnv('TG_ASSISTANT_CHAT_IDS') || '')
+    .split(',').map(s => s.trim()).filter(Boolean);
+
   bot.use(async (ctx, next) => {
-    const ownerId = getEnv('TG_OWNER_CHAT_ID') || '';
     const fromId = String(ctx.from?.id ?? '');
-    if (!ownerId || fromId !== ownerId) {
-      console.warn(`[bot] auth fail: fromId="${fromId}" ownerId="${ownerId}"`);
-      return;
+    if (OWNER_ID && fromId === OWNER_ID) {
+      ctx.role = 'owner';
+    } else if (ASSISTANT_IDS.includes(fromId)) {
+      ctx.role = 'assistant';
+    } else {
+      console.warn(`[bot] ignoring update from non-whitelisted ${fromId}`);
+      return; // silently ignore
     }
     await next();
   });
 
-  bot.command('start',       handleStart);
-  bot.command('help',        handleHelp);
-  bot.command('list',        handleList);
-  bot.command('current',     handleCurrent);
-  bot.command('skip',        handleSkip);
-  bot.command('cancel',      handleCancel);
-  bot.command('done_all',    handleDoneAll);
-  bot.command('auto_photos', handleAutoPhotos);
+  bot.command('start',        handleStart);
+  bot.command('help',         handleHelp);
+  bot.command('list',         handleList);
+  bot.command('current',      handleCurrent);
+  bot.command('skip',         handleSkip);
+  bot.command('cancel',       handleCancel);
+  bot.command('done_all',     handleDoneAll);
+  bot.command('auto_photos',  handleAutoPhotos);
+  bot.command('submit',       handleSubmit);
+  bot.command('owner_review', handleOwnerReview);
 
   bot.on('callback_query',   handleCallback);
   bot.on('message:photo',    handlePhoto);
