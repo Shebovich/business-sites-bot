@@ -4,6 +4,11 @@ node_modules/
 Thumbs.db
 *.rar
 *.zip
+# Binary installers — могут случайно попасть в _data/ и сломать push (>100MB)
+*.exe
+*.msi
+*.dmg
+*.iso
 
 # Секреты пайплайна — API ключи 2GIS и т.п.
 .env
