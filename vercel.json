@@ -6,10 +6,14 @@
     },
     "api/github-webhook.mjs": {
       "maxDuration": 10
+    },
+    "api/task/notify.mjs": {
+      "maxDuration": 10
     }
   },
   "rewrites": [
     { "source": "/api/bot/webhook", "destination": "/api/bot/webhook.mjs" },
-    { "source": "/api/github-webhook", "destination": "/api/github-webhook.mjs" }
+    { "source": "/api/github-webhook", "destination": "/api/github-webhook.mjs" },
+    { "source": "/api/task/notify", "destination": "/api/task/notify.mjs" }
   ]
 }
