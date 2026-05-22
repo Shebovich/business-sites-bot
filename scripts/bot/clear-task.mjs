@@ -49,12 +49,19 @@ const r = getRedis();
 const prefix = `task:${ISSUE}:`;
 
 // Upstash Redis supports SCAN; pull keys in batches.
+// Mirror the exception list from lib/state.mjs clearTaskState — preserve
+// `assistant_chat_id` (routing info, not session data; bot needs it to push
+// post-build notifications to the original submitter).
+const PRESERVED_SUFFIXES = [':assistant_chat_id'];
 let cursor = 0;
 const allKeys = [];
 do {
   const [next, batch] = await r.scan(cursor, { match: `${prefix}*`, count: 100 });
   cursor = Number(next);
-  for (const k of batch) allKeys.push(k);
+  for (const k of batch) {
+    if (PRESERVED_SUFFIXES.some(suffix => k.endsWith(suffix))) continue;
+    allKeys.push(k);
+  }
 } while (cursor !== 0);
 
 if (allKeys.length === 0) {
