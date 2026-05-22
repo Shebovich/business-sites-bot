@@ -9,7 +9,9 @@ import { getCurrentTask, setCurrentTask, setActiveSection, getActiveSection,
          getFeedbackPending, setFeedbackPending, clearFeedbackPending,
          removePhotoAt, unskipSection,
          addNote, getNotes, removeNoteAt, clearNotes,
-         getRoleOverride, setRoleOverride, clearRoleOverride, getRoleOverrideTtl } from './state.mjs';
+         getRoleOverride, setRoleOverride, clearRoleOverride, getRoleOverrideTtl,
+         isApprovedAssistant, addApprovedAssistant,
+         getPendingAccess, clearPendingAccess } from './state.mjs';
 import { buildTaskListKeyboard, buildSectionKeyboard,
          buildOwnerPushKeyboard, buildPreviewKeyboard } from './keyboard.mjs';
 import { SECTIONS, SECTION_BY_ID, LABELS, getEnv } from '../config.mjs';
@@ -1085,6 +1087,40 @@ function refFromPhoto(p) {
 export async function handleCallback(ctx) {
   const data = ctx.callbackQuery?.data || '';
   await ctx.answerCallbackQuery();
+
+  // Owner-only: approve/reject pending access request from an unknown chat.
+  // Callback data shape: `access:approve:<chatId>` / `access:reject:<chatId>`.
+  if (data.startsWith('access:')) {
+    if (ctx.role !== 'owner') return;
+    const [, action, chatIdStr] = data.split(':');
+    if (!chatIdStr) return;
+    const chatId = chatIdStr;
+    const pending = await getPendingAccess(chatId);
+    const isAlready = await isApprovedAssistant(chatId);
+    if (action === 'approve') {
+      if (!isAlready) await addApprovedAssistant(chatId);
+      await clearPendingAccess(chatId);
+      await sendMessage(chatId,
+        '✅ Доступ предоставлен. Ты теперь ассистент.\n\n' +
+        '/help — твои команды. /playbook — типовые сценарии.'
+      ).catch((e) => console.warn('[access] notify approve failed:', e.message));
+      await ctx.editMessageText(
+        (ctx.callbackQuery.message?.text || ctx.callbackQuery.message?.caption || '') +
+        `\n\n✅ Approved.`
+      ).catch(() => {});
+    } else if (action === 'reject') {
+      await clearPendingAccess(chatId);
+      await sendMessage(chatId,
+        '❌ В доступе отказано.\n\n' +
+        'Если думаешь, что это ошибка — напиши Pavel напрямую.'
+      ).catch((e) => console.warn('[access] notify reject failed:', e.message));
+      await ctx.editMessageText(
+        (ctx.callbackQuery.message?.text || ctx.callbackQuery.message?.caption || '') +
+        `\n\n❌ Rejected.`
+      ).catch(() => {});
+    }
+    return;
+  }
 
   if (data.startsWith('sec:')) {
     const sectionId = data.slice(4);

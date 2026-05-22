@@ -15,7 +15,9 @@ import {
 } from '../../scripts/bot/lib/commands.mjs';
 import { assertEnv, getEnv } from '../../scripts/bot/config.mjs';
 import { sendMessage } from '../../scripts/bot/lib/tg-api.mjs';
-import { getRoleOverride } from '../../scripts/bot/lib/state.mjs';
+import { getRoleOverride, isApprovedAssistant,
+         setPendingAccess, getPendingAccess } from '../../scripts/bot/lib/state.mjs';
+import { InlineKeyboard } from 'grammy';
 
 export const config = { api: { bodyParser: false } };
 
@@ -127,11 +129,20 @@ function getBot() {
   bot.use(async (ctx, next) => {
     const fromId = String(ctx.from?.id ?? '');
 
-    // Resolve real role from whitelist.
+    // Resolve real role. Owner is fixed in env (single owner by design).
+    // Assistants come from env (boot seed) plus a Redis overlay populated by
+    // owner-driven /approve callbacks — change without redeploy.
     let realRole;
-    if (OWNER_ID && fromId === OWNER_ID) realRole = 'owner';
-    else if (ASSISTANT_IDS.includes(fromId)) realRole = 'assistant';
-    else realRole = 'unknown';
+    if (OWNER_ID && fromId === OWNER_ID) {
+      realRole = 'owner';
+    } else if (ASSISTANT_IDS.includes(fromId)) {
+      realRole = 'assistant';
+    } else {
+      let isDynamicAssistant = false;
+      try { isDynamicAssistant = await isApprovedAssistant(fromId); }
+      catch (e) { console.warn('[bot] isApprovedAssistant check failed:', e.message); }
+      realRole = isDynamicAssistant ? 'assistant' : 'unknown';
+    }
 
     // Debug override (owner-only feature, see /role command). Only owners may
     // downgrade their effective role for testing — escalation is impossible.
@@ -162,30 +173,50 @@ function getBot() {
       return;
     }
 
-    // M3c — Q29 onboarding: tell the user their chat_id, push owner with
-    // access request. Throttle via in-memory set (cold start resets).
+    // Onboarding flow for unknown chats. Hybrid throttle: pending state in
+    // Redis (survives cold start, has TTL) plus in-memory set (fast path,
+    // avoids Redis roundtrip on hot requests from a known-pending chat).
     try {
-      const username = ctx.from?.username ? `@${ctx.from.username}` : '(no username)';
+      const username = ctx.from?.username ? `@${ctx.from.username}` : '';
+      const firstName = ctx.from?.first_name || '';
       const overrideNote = realRole === 'owner'
         ? '\n\n<i>(role override active — /role reset чтобы вернуться в owner)</i>'
         : '';
+
+      // If we already have a pending request from this chat, reply with a
+      // soft reminder instead of re-pinging owner.
+      const pending = realRole !== 'owner' ? await getPendingAccess(fromId).catch(() => null) : null;
+      if (pending) {
+        await ctx.reply(
+          `🕓 Твой запрос на рассмотрении у owner'а. Дождись решения — оно прилетит сюда.${overrideNote}`,
+          { parse_mode: 'HTML' }
+        );
+        return;
+      }
+
       await ctx.reply(
         `👋 Привет. Я бот ревью сайтов Shebovich.\n\n` +
         `Твой chat_id: <code>${fromId}</code>\n\n` +
-        `Перешли этот id Pavel — он добавит тебя в whitelist. Я тебя пока игнорю.` +
-        overrideNote,
+        `🕓 Запрос отправлен owner'у. Жди ответа — он прилетит сюда.${overrideNote}`,
         { parse_mode: 'HTML' }
       );
+
       // Skip owner-ping when we're just simulating unknown via override —
       // owner is the same person who triggered it.
       if (OWNER_ID && realRole !== 'owner' && !onboardingPinged.has(fromId)) {
         onboardingPinged.add(fromId);
-        const safeUsername = username.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        await setPendingAccess(fromId, { username, first_name: firstName }).catch(() => {});
+
+        const safe = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        const displayName = username ? safe(username) : (firstName ? safe(firstName) : '(no username)');
+        const kb = new InlineKeyboard()
+          .text('✅ Approve', `access:approve:${fromId}`)
+          .text('❌ Reject', `access:reject:${fromId}`);
         await sendMessage(OWNER_ID,
-          `🔔 Новый chat_id хочет доступ:\n• ${safeUsername}\n• id <code>${fromId}</code>\n\n` +
-          `Добавь в <code>TG_ASSISTANT_CHAT_IDS</code> через Vercel env, потом redeploy.`,
-          { parse_mode: 'HTML' }
-        ).catch(() => {});
+          `🔔 Запрос доступа:\n• ${displayName}\n• id <code>${fromId}</code>\n\n` +
+          `Тапни кнопку, бот сам ответит требующему.`,
+          { parse_mode: 'HTML', reply_markup: kb }
+        ).catch((e) => console.warn('[bot] owner access-ping failed:', e.message));
       }
     } catch (e) {
       console.warn(`[bot] onboarding reply failed for ${fromId}:`, e.message);

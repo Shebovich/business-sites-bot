@@ -48,6 +48,12 @@ const K = {
   // without needing a second TG account. TTL'd so it can't accidentally
   // lock owner out of their own commands forever.
   roleOverride:     (chatId) => `role-override:${chatId}`,
+  // Dynamic assistant whitelist (overlay on top of env TG_ASSISTANT_CHAT_IDS).
+  // Set of chat_id strings. Persistent — no TTL.
+  assistantsSet:    () => `assistants:approved`,
+  // Pending access requests, hash with username + first_name + requested_at.
+  // TTL'd so abandoned requests don't pile up.
+  pendingAccess:    (chatId) => `assistants:pending:${chatId}`,
 };
 
 // ---- Role override (debug) -----------------------------------------------
@@ -70,6 +76,51 @@ export async function clearRoleOverride(chatId) {
 
 export async function getRoleOverrideTtl(chatId) {
   return await getRedis().ttl(K.roleOverride(chatId));
+}
+
+// ---- Dynamic assistant whitelist (Redis overlay on top of env) -----------
+
+export async function isApprovedAssistant(chatId) {
+  return (await getRedis().sismember(K.assistantsSet(), String(chatId))) === 1;
+}
+
+export async function addApprovedAssistant(chatId) {
+  await getRedis().sadd(K.assistantsSet(), String(chatId));
+}
+
+export async function removeApprovedAssistant(chatId) {
+  await getRedis().srem(K.assistantsSet(), String(chatId));
+}
+
+export async function getApprovedAssistants() {
+  const members = await getRedis().smembers(K.assistantsSet());
+  return members || [];
+}
+
+// ---- Pending access requests --------------------------------------------
+
+// 7 days — long enough for owner to notice and decide; short enough that
+// abandoned requests roll off on their own.
+const PENDING_ACCESS_TTL = 7 * 24 * 60 * 60;
+
+export async function setPendingAccess(chatId, meta) {
+  const value = JSON.stringify({
+    username: meta.username || '',
+    first_name: meta.first_name || '',
+    requested_at: new Date().toISOString(),
+  });
+  await getRedis().set(K.pendingAccess(chatId), value, { ex: PENDING_ACCESS_TTL });
+}
+
+export async function getPendingAccess(chatId) {
+  const raw = await getRedis().get(K.pendingAccess(chatId));
+  if (!raw) return null;
+  try { return typeof raw === 'string' ? JSON.parse(raw) : raw; }
+  catch { return null; }
+}
+
+export async function clearPendingAccess(chatId) {
+  await getRedis().del(K.pendingAccess(chatId));
 }
 
 // ---- Current task --------------------------------------------------------
