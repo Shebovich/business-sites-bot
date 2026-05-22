@@ -202,11 +202,29 @@ export function buildGalleryBatches(state) {
       }
     });
   }
+  // TG sendMediaGroup rejects groups containing duplicate file_id/url with
+  // HTTP 404 — known quirk. We dedupe within the gallery (assistants often
+  // send the same photo to multiple sections, or upload same file twice).
+  // Captions of duplicates are merged so owner still sees where it belongs.
+  const seen = new Map();
+  const deduped = [];
+  for (const item of all) {
+    if (item._placeholder) { deduped.push(item); continue; }
+    const key = item.media;
+    if (seen.has(key)) {
+      const first = deduped[seen.get(key)];
+      first.caption = `${first.caption} + ${item.caption}`;
+    } else {
+      seen.set(key, deduped.length);
+      deduped.push({ ...item });
+    }
+  }
+
   // Split into batches of 10 (TG sendMediaGroup limit).
   const batches = [];
   let current = [];
   let placeholders = [];
-  for (const item of all) {
+  for (const item of deduped) {
     if (item._placeholder) {
       placeholders.push(`${item.label}: ${truncate(item.url, 80)}`);
       continue;
