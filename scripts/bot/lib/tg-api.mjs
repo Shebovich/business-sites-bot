@@ -12,7 +12,11 @@ export async function tgApi(method, payload = {}) {
     body: JSON.stringify(payload),
   });
   const json = await res.json();
-  if (!json.ok) throw new Error(`TG API ${method}: ${json.description || res.status}`);
+  if (!json.ok) {
+    const desc = json.description || '<no description>';
+    const code = json.error_code != null ? ` error_code=${json.error_code}` : '';
+    throw new Error(`TG API ${method}: ${desc} (HTTP ${res.status}${code})`);
+  }
   return json.result;
 }
 
