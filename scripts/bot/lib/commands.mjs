@@ -233,15 +233,31 @@ async function pullNextFromQueue(ctx) {
     if (!res.ok) throw new Error(`${res.status}`);
     queue = await res.json();
   } catch (e) {
+    // Two failure modes share this fallback: queue file doesn't exist (404)
+    // or fetch errored. Either way the user wants something actionable, not
+    // a stack trace — surface the ad-hoc propose-a-lead path first.
     await ctx.reply(
-      `Очередь пустая или недоступна (${e.message}).\n\n` +
-      `Запусти на ноуте \`node scripts/scrape-venues.mjs --commit\` — это сгенерит \`_data/scout_queue.json\`.`,
-      { parse_mode: 'Markdown' }
+      `📭 Очередь пуста или ещё не сгенерирована.\n\n` +
+      `<b>Предложить лид руками:</b>\n` +
+      `<code>/scout https://2gis.by/...</code>\n` +
+      `<code>/scout @ig_handle</code>\n` +
+      `<code>/scout Название заведения</code>\n\n` +
+      `<i>Если хочешь пополнить очередь массово, запусти на ноуте:</i>\n` +
+      `<code>node scripts/scrape-venues.mjs --commit</code>`,
+      { parse_mode: 'HTML' }
     );
     return;
   }
   if (!Array.isArray(queue) || queue.length === 0) {
-    await ctx.reply('Очередь пуста. /scout refresh для пополнения.');
+    await ctx.reply(
+      `📭 Очередь пуста.\n\n` +
+      `<b>Предложить лид руками:</b>\n` +
+      `<code>/scout https://2gis.by/...</code>\n` +
+      `<code>/scout @ig_handle</code>\n` +
+      `<code>/scout Название заведения</code>\n\n` +
+      `<i>Или пополни очередь:</i> <code>/scout refresh</code>`,
+      { parse_mode: 'HTML' }
+    );
     return;
   }
   const next = queue[0];
