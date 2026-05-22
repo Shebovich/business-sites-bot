@@ -31,15 +31,18 @@ async function ghFetch(path, init = {}, { authRequired = false } = {}) {
 }
 
 // Public repo read — works without token (60 req/hr anon limit, 5000/hr with token).
-export async function listIssuesByLabel(label) {
+export async function listIssuesByLabel(label, { state = 'open' } = {}) {
   const issues = await ghFetch(
-    `/repos/${GITHUB_REPO}/issues?labels=${encodeURIComponent(label)}&state=open&per_page=50`
+    `/repos/${GITHUB_REPO}/issues?labels=${encodeURIComponent(label)}&state=${encodeURIComponent(state)}&per_page=100`
   );
   return issues.map(i => ({
     number: i.number,
     title: i.title,
     body: i.body,
     labels: i.labels.map(l => l.name),
+    state: i.state,
+    created_at: i.created_at,
+    closed_at: i.closed_at,
     html_url: i.html_url,
   }));
 }

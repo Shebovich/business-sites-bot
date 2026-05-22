@@ -3,7 +3,7 @@
 // media-group payloads for lazy gallery.
 
 import crypto from 'node:crypto';
-import { SECTIONS, SECTION_BY_ID } from '../config.mjs';
+import { getSections, getSectionById } from './sections.mjs';
 import { getPhotos, getTextEdits, getSkipped, getNotes } from './state.mjs';
 
 const TG_MESSAGE_LIMIT = 4096;
@@ -13,7 +13,7 @@ const TEXT_PREVIEW_LIMIT = 150;
 // Used by both push-builder and hash function.
 export async function collectSubmitState(issueNumber) {
   const sections = {};
-  for (const s of SECTIONS) {
+  for (const s of getSections()) {
     const photos = await getPhotos(issueNumber, s.id);
     sections[s.id] = photos;
   }
@@ -86,7 +86,7 @@ export function buildOwnerPush({ task, who, round, state }) {
   // section quotas to submit, so there's no point listing empty sections
   // with red ❌ — that just nags about a non-requirement.
   const photoLines = [];
-  for (const s of SECTIONS) {
+  for (const s of getSections()) {
     const photos = sections[s.id] || [];
     if (skipped.includes(s.id)) {
       photoLines.push(`⏭ ${s.label}: пропущена`);
@@ -131,7 +131,7 @@ export function buildOwnerPush({ task, who, round, state }) {
   // still needs downloading at rebuild time). Per-item caption rendered as
   // sub-bullet so instructions like "crop top" are visible without tapping.
   const urlEntries = [];
-  for (const s of SECTIONS) {
+  for (const s of getSections()) {
     for (const p of (sections[s.id] || [])) {
       if (p.source === 'url' && p.url) {
         urlEntries.push({ url: p.url, section: s.label, caption: p.caption || '' });
@@ -155,7 +155,7 @@ export function buildOwnerPush({ task, who, round, state }) {
     lines.push(`📝 Заметки (${notes.length}):`);
     notes.forEach((n, idx) => {
       const where = n.section
-        ? (SECTION_BY_ID[n.section]?.label || n.section)
+        ? (getSectionById(n.section)?.label || n.section)
         : 'общая';
       lines.push(`${idx + 1}. [${where}] ${truncate(n.text, 200)}`);
     });
@@ -204,7 +204,7 @@ export function ownerPushActions(issueNumber) {
 export function buildGalleryBatches(state) {
   const { sections } = state;
   const all = [];
-  for (const s of SECTIONS) {
+  for (const s of getSections()) {
     const photos = sections[s.id] || [];
     photos.forEach((p, idx) => {
       const positionLabel = `[${s.id}] ${idx + 1}/${photos.length}`;

@@ -9,14 +9,16 @@ import {
   handleApprove, handleApproveAll, handlePreview, handleRm, handleUnskip,
   handleNote, handleNotes, handleRmNote, handleClearNotes,
   handleWhoami, handlePlaybook, handleRole,
-  handlePitchReview, handleSold, handleLost, handleGhosted,
+  handlePitchReview, handleSold, handleLost, handleGhosted, handleStats,
   handleScout, handleScoutReview,
+  handleBlock, handleUnblock, handleAbandon, handleReassign,
   handleCallback, handlePhoto, handleVideo, handleText,
 } from '../../scripts/bot/lib/commands.mjs';
 import { assertEnv, getEnv } from '../../scripts/bot/config.mjs';
 import { getRoleOverride, isApprovedAssistant,
          setPendingAccess, getPendingAccess, refreshPendingPing,
          clearCommandPending } from '../../scripts/bot/lib/state.mjs';
+import { warmSections } from '../../scripts/bot/lib/sections.mjs';
 import { InlineKeyboard } from 'grammy';
 
 export const config = { api: { bodyParser: false } };
@@ -44,6 +46,9 @@ const COMMON_COMMANDS = [
   { command: 'unskip',   description: 'Отменить skip' },
   { command: 'rm',       description: 'Удалить N-ое фото из секции' },
   { command: 'cancel',   description: 'Сбросить текущую задачу' },
+  { command: 'block',    description: 'N <причина> — поставить задачу на паузу' },
+  { command: 'unblock',  description: 'N — снять паузу' },
+  { command: 'abandon',  description: 'N <причина> — отпустить задачу' },
   { command: 'whoami',   description: 'Моя роль + chat_id' },
   { command: 'playbook', description: 'Типовые сценарии для роли' },
 ];
@@ -65,8 +70,10 @@ const OWNER_COMMANDS = [
   { command: 'sold',         description: 'N [notes] — продано' },
   { command: 'lost',         description: 'N [reason] — не сложилось' },
   { command: 'ghosted',      description: 'N — клиент молчит' },
+  { command: 'stats',        description: 'Pipeline conversion analytics' },
   { command: 'scout',        description: 'Следующий лид или ad-hoc' },
   { command: 'scout_review', description: 'Inbox новых scouted' },
+  { command: 'reassign',     description: 'N <chatId> — передать задачу другому' },
   { command: 'role',         description: 'Debug: смена эффективной роли (30 мин)' },
 ];
 
@@ -126,6 +133,12 @@ function getBot() {
   // Fire-and-forget: refresh TG slash-menu on cold start.
   registerCommandsOnce(getEnv('TG_BOT_TOKEN'), OWNER_ID, ASSISTANT_IDS);
 
+  // Phase 1.5 — warm vertical-aware sections cache. Fetches yaml from
+  // GitHub raw (or Upstash hot cache), populates in-memory MEM so sync
+  // getSections() returns yaml values instead of static fallback.
+  // Doesn't throw — failures degrade to static config.SECTIONS.
+  warmSections().catch(e => console.warn('[bot] warmSections failed:', e.message));
+
   bot.use(async (ctx, next) => {
     const fromId = String(ctx.from?.id ?? '');
 
@@ -157,6 +170,19 @@ function getBot() {
     }
     ctx.role = effectiveRole;
     ctx.realRole = realRole;
+
+    // Maintenance mode (Phase 1.6). Owner always passes (включая всех с
+    // realRole=owner — debug overrides не должны блокировать оператора).
+    // Всем остальным — единственный ответ и стоп.
+    if (
+      getEnv('BOT_MAINTENANCE_MODE') === 'true'
+      && realRole !== 'owner'
+    ) {
+      const msg = getEnv('BOT_MAINTENANCE_MESSAGE')
+        || '🛠 Бот на обслуживании. Вернусь чуть позже.';
+      try { await ctx.reply(msg); } catch {}
+      return;
+    }
 
     if (effectiveRole !== 'unknown') {
       // Conversational flow: if user types a fresh /command, drop any
@@ -273,8 +299,13 @@ function getBot() {
   bot.command('sold',         handleSold);
   bot.command('lost',         handleLost);
   bot.command('ghosted',      handleGhosted);
+  bot.command('stats',        handleStats);
   bot.command('scout',        handleScout);
   bot.command('scout_review', handleScoutReview);
+  bot.command('block',        handleBlock);
+  bot.command('unblock',      handleUnblock);
+  bot.command('abandon',      handleAbandon);
+  bot.command('reassign',     handleReassign);
 
   bot.on('callback_query',   handleCallback);
   bot.on('message:photo',    handlePhoto);

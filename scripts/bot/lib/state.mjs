@@ -57,6 +57,20 @@ const K = {
   // Conversational flow: command awaiting free-form input on next message.
   // TTL'd short — abandoned prompts shouldn't capture unrelated text later.
   cmdPending:       (chatId) => `cmd-pending:${chatId}`,
+  // Phase 1.2 — task ownership state machine.
+  // assignee: chatId of the assistant currently owning task N (or owner).
+  // blocker:  JSON { reason, set_by, set_at } when task is in /block state.
+  // activeTask: per-chatId pointer to "my current WIP task #" (single WIP rule).
+  taskAssignee:     (issueNumber) => `task:${issueNumber}:assignee`,
+  taskBlocker:      (issueNumber) => `task:${issueNumber}:blocker`,
+  activeTask:       (chatId) => `assistant:${chatId}:active_task`,
+  // Last activity marker for auto-stale sweep (scheduled-poke 7d warning + 24h auto-abandon).
+  // Updated on any /current /skip /unskip /note /photo etc. for assigned task.
+  taskLastTouched:  (issueNumber) => `task:${issueNumber}:last_touched`,
+  // Phase 1.3 — pitch tracking. Set when owner taps [Pitched] + picks channel.
+  // JSON { at, channel }. Used by scheduled-poke for 3d/7d/14d reminders +
+  // 21d auto-ghosted suggestion.
+  pitchInfo:        (issueNumber) => `task:${issueNumber}:pitch`,
 };
 
 // ---- Role override (debug) -----------------------------------------------
@@ -422,4 +436,104 @@ export async function removeNoteAt(issueNumber, oneBasedIdx) {
 
 export async function clearNotes(issueNumber) {
   await getRedis().del(K.notes(issueNumber));
+}
+
+// ---- Phase 1.2: task ownership state machine ----------------------------
+// Single-WIP-per-assistant rule: an assistant may have at most one active
+// task. /block parks the current one (frees the WIP slot, keeps assignee).
+// /abandon fully releases (clears assignee + blocker). /reassign is
+// owner-only and transfers assignee atomically.
+//
+// Owner is exempt from single-WIP enforcement — they coordinate everything
+// and may juggle several tasks in parallel.
+
+export async function getTaskAssignee(issueNumber) {
+  return await getRedis().get(K.taskAssignee(issueNumber));
+}
+
+export async function setTaskAssignee(issueNumber, chatId) {
+  await getRedis().set(K.taskAssignee(issueNumber), String(chatId));
+}
+
+export async function clearTaskAssignee(issueNumber) {
+  await getRedis().del(K.taskAssignee(issueNumber));
+}
+
+export async function getTaskBlocker(issueNumber) {
+  const raw = await getRedis().get(K.taskBlocker(issueNumber));
+  if (!raw) return null;
+  try { return typeof raw === 'string' ? JSON.parse(raw) : raw; }
+  catch { return null; }
+}
+
+export async function setTaskBlocker(issueNumber, { reason, setBy }) {
+  const value = JSON.stringify({
+    reason: String(reason || '').slice(0, 500),
+    set_by: String(setBy),
+    set_at: new Date().toISOString(),
+  });
+  await getRedis().set(K.taskBlocker(issueNumber), value);
+}
+
+export async function clearTaskBlocker(issueNumber) {
+  await getRedis().del(K.taskBlocker(issueNumber));
+}
+
+export async function getActiveTask(chatId) {
+  const v = await getRedis().get(K.activeTask(chatId));
+  return v ? Number(v) : null;
+}
+
+export async function setActiveTask(chatId, issueNumber) {
+  await getRedis().set(K.activeTask(chatId), String(issueNumber));
+}
+
+export async function clearActiveTask(chatId) {
+  await getRedis().del(K.activeTask(chatId));
+}
+
+export async function touchTask(issueNumber) {
+  await getRedis().set(K.taskLastTouched(issueNumber), new Date().toISOString());
+}
+
+export async function getTaskLastTouched(issueNumber) {
+  return await getRedis().get(K.taskLastTouched(issueNumber));
+}
+
+// ---- Phase 1.3: pitch tracking ------------------------------------------
+
+export async function setPitchInfo(issueNumber, { channel }) {
+  const value = JSON.stringify({
+    channel: String(channel || 'other').slice(0, 32),
+    at: new Date().toISOString(),
+  });
+  await getRedis().set(K.pitchInfo(issueNumber), value);
+}
+
+export async function getPitchInfo(issueNumber) {
+  const raw = await getRedis().get(K.pitchInfo(issueNumber));
+  if (!raw) return null;
+  try { return typeof raw === 'string' ? JSON.parse(raw) : raw; }
+  catch { return null; }
+}
+
+export async function clearPitchInfo(issueNumber) {
+  await getRedis().del(K.pitchInfo(issueNumber));
+}
+
+// Convenience for auto-stale sweep — returns all task numbers with
+// assignee set. Caller filters by last_touched age.
+export async function listAssignedTasks() {
+  const r = getRedis();
+  let cursor = 0;
+  const numbers = new Set();
+  do {
+    const [next, batch] = await r.scan(cursor, { match: 'task:*:assignee', count: 100 });
+    cursor = Number(next);
+    for (const k of batch) {
+      const m = k.match(/^task:(\d+):assignee$/);
+      if (m) numbers.add(Number(m[1]));
+    }
+  } while (cursor !== 0);
+  return [...numbers];
 }

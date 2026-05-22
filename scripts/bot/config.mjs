@@ -25,6 +25,9 @@ export const LABELS = {
   AWAITING_SCOUT: 'awaiting-scout',
   SCOUTED: 'scouted',
   EXISTING_SITE_REPLACE: 'existing-site-replace',
+  // Phase 1.1 — explicit reject path для /scout_review.
+  // Issue закрывается с причиной + комментарий + push assignee.
+  WONT_DO: 'wont-do',
 };
 
 // Sections a user can submit photos for. Each entry: id, label (RU display),

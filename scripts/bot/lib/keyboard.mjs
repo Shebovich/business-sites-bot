@@ -2,8 +2,8 @@
 // See Q16.2 (UX: inline keyboard with progress + multi-input).
 
 import { InlineKeyboard } from 'grammy';
-import { SECTIONS } from '../config.mjs';
 import { countPhotos, getSkipped } from './state.mjs';
+import { getSections } from './sections.mjs';
 
 // Build the main section keyboard for a task.
 // progress per section: "✅ 5/4", "3/4", "(нужно 1)", "⏭ skipped".
@@ -11,7 +11,7 @@ export async function buildSectionKeyboard(issueNumber) {
   const kb = new InlineKeyboard();
   const skipped = new Set(await getSkipped(issueNumber));
 
-  for (const section of SECTIONS) {
+  for (const section of getSections()) {
     const count = await countPhotos(issueNumber, section.id);
     const label = renderSectionButton(section, count, skipped.has(section.id));
     kb.text(label, `sec:${section.id}`).row();

@@ -12,10 +12,15 @@ import { getCurrentTask, setCurrentTask, setActiveSection, getActiveSection,
          getRoleOverride, setRoleOverride, clearRoleOverride, getRoleOverrideTtl,
          isApprovedAssistant, addApprovedAssistant,
          getPendingAccess, clearPendingAccess,
-         setCommandPending, getCommandPending, clearCommandPending } from './state.mjs';
+         setCommandPending, getCommandPending, clearCommandPending,
+         getTaskAssignee, setTaskAssignee, clearTaskAssignee,
+         getTaskBlocker, setTaskBlocker, clearTaskBlocker,
+         getActiveTask, setActiveTask, clearActiveTask,
+         touchTask, setPitchInfo, getPitchInfo } from './state.mjs';
 import { buildTaskListKeyboard, buildSectionKeyboard,
          buildOwnerPushKeyboard, buildPreviewKeyboard } from './keyboard.mjs';
-import { SECTIONS, SECTION_BY_ID, LABELS, getEnv } from '../config.mjs';
+import { LABELS, getEnv } from '../config.mjs';
+import { getSections, getSectionById } from './sections.mjs';
 import { persistUrlInput, persistTgUpload } from './photo-handler.mjs';
 import { splitUrlAndCaption, parseTextEdit } from './text-parser.mjs';
 import { collectSubmitState, hashSubmitState, buildOwnerPush,
@@ -324,11 +329,266 @@ export async function handleScoutReview(ctx) {
     const name = t.venue_name || t.slug || `issue-${t.issue_number}`;
     const kb = new InlineKeyboard()
       .text('✅ Approve и начать', `scout_review:${t.issue_number}:approve`)
-      .text('⏭ Skip', `scout_review:${t.issue_number}:skip`)
+      .text('❌ Reject', `scout_review:${t.issue_number}:reject`)
       .row()
+      .text('⏭ Skip', `scout_review:${t.issue_number}:skip`)
       .text('👁 Открыть issue', `scout_review:${t.issue_number}:open`);
     await ctx.reply(`${name} · #${t.issue_number}\n${t.html_url}`, { reply_markup: kb });
   }
+}
+
+// Phase 1.1 — explicit reject path для /scout_review. Owner кнопкой `❌ Reject`
+// триггерит prompt причины (через cmd-pending), потом handleText вызывает эту
+// функцию: коммент в issue + label `wont-do` + close + push assignee. Если в
+// issue body есть Bot-metadata с assistant_chat_id — пингуем его.
+export async function processScoutRejectInput(ctx, reason, issueNumber) {
+  if (ctx.role !== 'owner') return;
+  if (!Number.isFinite(issueNumber)) {
+    await ctx.reply('⚠️ Не нашёл issue number в pending state — попробуй /scout_review заново.');
+    return;
+  }
+  const cleanReason = (reason || '').trim() || 'причина не указана';
+  const ownerName = ctx.from?.username ? `@${ctx.from.username}` : (ctx.from?.first_name || 'owner');
+  const today = new Date().toISOString().slice(0, 10);
+  const commentBody = `❌ **Rejected by ${ownerName} on ${today}.**\n\n${cleanReason}`;
+
+  let commentOk = false;
+  try {
+    await commentOnIssue(issueNumber, commentBody);
+    commentOk = true;
+  } catch (e) {
+    console.warn('[scout_reject] commentOnIssue failed:', e.message);
+  }
+  try {
+    await setLabel(issueNumber, LABELS.WONT_DO, LABELS.SCOUTED);
+  } catch (e) {
+    console.warn('[scout_reject] setLabel failed:', e.message);
+  }
+  try {
+    await closeIssue(issueNumber, { stateReason: 'not_planned' });
+  } catch (e) {
+    console.warn('[scout_reject] closeIssue failed:', e.message);
+  }
+  try {
+    const assistantId = await getAssistantChatId(issueNumber);
+    if (assistantId) {
+      await sendMessage(assistantId,
+        `❌ Твой scout #${issueNumber} отклонён owner'ом.\n\n` +
+        `Причина: ${cleanReason}\n\n` +
+        `Следующий лид — /scout {URL или название}.`
+      );
+    }
+  } catch (e) {
+    console.warn('[scout_reject] assistant push failed:', e.message);
+  }
+
+  await ctx.reply(
+    `✅ #${issueNumber} → \`wont-do\` + closed.` +
+    (commentOk ? ' Комментарий в issue + push ассистенту.' : ' (комментарий не записан — см. логи)'),
+    { parse_mode: 'Markdown' }
+  );
+}
+
+// ---- Phase 1.2: task ownership state machine ----------------------------
+// Single source of truth для "кто владеет задачей". Owner может взять
+// что угодно и игнорировать WIP-limit. Ассистент держит ровно одну
+// активную задачу; чтобы сменить — /block /abandon /submit текущую.
+
+async function claimTaskOrFail(chatId, issueNumber, role) {
+  const existingAssignee = await getTaskAssignee(issueNumber);
+  if (existingAssignee && existingAssignee !== chatId && role !== 'owner') {
+    return {
+      ok: false,
+      msg: `🔒 #${issueNumber} уже взята другим (chat \`${existingAssignee}\`).\n\n` +
+           `Если думаешь, что это ошибка — owner может /reassign.`,
+    };
+  }
+  const blocker = await getTaskBlocker(issueNumber);
+  if (blocker && existingAssignee !== chatId && role !== 'owner') {
+    return {
+      ok: false,
+      msg: `🚧 #${issueNumber} заблокирована: ${blocker.reason || '(без причины)'}\n\n` +
+           `Кто блокировал — chat \`${blocker.set_by}\`. /unblock когда снимут.`,
+    };
+  }
+  if (role !== 'owner') {
+    const currentActive = await getActiveTask(chatId);
+    if (currentActive && currentActive !== issueNumber) {
+      return {
+        ok: false,
+        msg: `⚠️ У тебя уже активная задача #${currentActive}.\n\n` +
+             `Сначала заверши через /submit, поставь на паузу /block ${currentActive} <причина>, ` +
+             `или отпусти /abandon ${currentActive} <причина>.`,
+      };
+    }
+  }
+  await setTaskAssignee(issueNumber, chatId);
+  if (role !== 'owner') {
+    await setActiveTask(chatId, issueNumber);
+  }
+  await touchTask(issueNumber);
+  return { ok: true };
+}
+
+// /block N <reason> — pause active task, keep assignee but free WIP-slot.
+export async function handleBlock(ctx) {
+  const { issueNumber, rest } = parseLifecycleArg(ctx.match);
+  if (!issueNumber) {
+    await ctx.reply(
+      'Использование: /block <N> <причина>\n\n' +
+      'Пример: /block 19 жду фото меню от клиента',
+    );
+    return;
+  }
+  if (!rest) {
+    await ctx.reply('Нужна причина блокировки — почему задача стоит.\n\n/block 19 <причина>');
+    return;
+  }
+  const chatId = String(ctx.from?.id);
+  const assignee = await getTaskAssignee(issueNumber);
+  if (assignee && assignee !== chatId && ctx.role !== 'owner') {
+    await ctx.reply(`#${issueNumber} не твоя — assignee \`${assignee}\`. Только он или owner может /block.`,
+      { parse_mode: 'Markdown' });
+    return;
+  }
+  await setTaskBlocker(issueNumber, { reason: rest, setBy: chatId });
+  const currentActive = await getActiveTask(chatId);
+  if (currentActive === issueNumber) {
+    await clearActiveTask(chatId);
+  }
+  const who = ctx.from?.username ? `@${ctx.from.username}` : (ctx.from?.first_name || chatId);
+  try {
+    await commentOnIssue(issueNumber, `🚧 **Blocked by ${who}.** ${rest}`);
+  } catch (e) { console.warn('[block] commentOnIssue failed:', e.message); }
+  await ctx.reply(
+    `🚧 #${issueNumber} заблокирована. WIP-слот свободен — можешь брать другую через /list.\n\n` +
+    `Снять — /unblock ${issueNumber}.`
+  );
+}
+
+// /unblock N — clear blocker + re-claim WIP-slot (if assignee).
+export async function handleUnblock(ctx) {
+  const { issueNumber } = parseLifecycleArg(ctx.match);
+  if (!issueNumber) {
+    await ctx.reply('Использование: /unblock <N>. Пример: /unblock 19');
+    return;
+  }
+  const chatId = String(ctx.from?.id);
+  const assignee = await getTaskAssignee(issueNumber);
+  if (assignee && assignee !== chatId && ctx.role !== 'owner') {
+    await ctx.reply(`#${issueNumber} не твоя — assignee \`${assignee}\`.`, { parse_mode: 'Markdown' });
+    return;
+  }
+  const blocker = await getTaskBlocker(issueNumber);
+  if (!blocker) {
+    await ctx.reply(`#${issueNumber} не была заблокирована.`);
+    return;
+  }
+  // Re-claim WIP only if assistant and slot free; owner not subject to WIP rule.
+  if (ctx.role !== 'owner' && assignee === chatId) {
+    const currentActive = await getActiveTask(chatId);
+    if (currentActive && currentActive !== issueNumber) {
+      await ctx.reply(
+        `Снял блокер с #${issueNumber}, но у тебя уже активна #${currentActive}.\n` +
+        `Сначала /block или /abandon её, потом /unblock ${issueNumber} ещё раз.`
+      );
+      // Don't claim WIP — but blocker is already cleared. Caller can re-trigger.
+      await clearTaskBlocker(issueNumber);
+      return;
+    }
+    await setActiveTask(chatId, issueNumber);
+  }
+  await clearTaskBlocker(issueNumber);
+  const who = ctx.from?.username ? `@${ctx.from.username}` : (ctx.from?.first_name || chatId);
+  try {
+    await commentOnIssue(issueNumber, `✅ **Unblocked by ${who}.**`);
+  } catch (e) { console.warn('[unblock] commentOnIssue failed:', e.message); }
+  await ctx.reply(`✅ #${issueNumber} разблокирована. /current → продолжить.`);
+}
+
+// /abandon N <reason> — release task entirely (clear assignee + blocker + my active_task).
+export async function handleAbandon(ctx) {
+  const { issueNumber, rest } = parseLifecycleArg(ctx.match);
+  if (!issueNumber) {
+    await ctx.reply(
+      'Использование: /abandon <N> <причина>\n\n' +
+      'Пример: /abandon 19 не моя зона — пусть кто-то другой возьмёт',
+    );
+    return;
+  }
+  if (!rest) {
+    await ctx.reply('Нужна причина abandon (чтобы owner понимал почему отпустил).\n\n/abandon 19 <причина>');
+    return;
+  }
+  const chatId = String(ctx.from?.id);
+  const assignee = await getTaskAssignee(issueNumber);
+  if (assignee && assignee !== chatId && ctx.role !== 'owner') {
+    await ctx.reply(`#${issueNumber} не твоя — assignee \`${assignee}\`.`, { parse_mode: 'Markdown' });
+    return;
+  }
+  await clearTaskAssignee(issueNumber);
+  await clearTaskBlocker(issueNumber);
+  if (assignee) {
+    const theirActive = await getActiveTask(assignee);
+    if (theirActive === issueNumber) {
+      await clearActiveTask(assignee);
+    }
+  }
+  const who = ctx.from?.username ? `@${ctx.from.username}` : (ctx.from?.first_name || chatId);
+  try {
+    await commentOnIssue(issueNumber, `↩️ **Abandoned by ${who}.** ${rest}`);
+  } catch (e) { console.warn('[abandon] commentOnIssue failed:', e.message); }
+  await ctx.reply(`↩️ #${issueNumber} отпущена — теперь её может взять любой.`);
+}
+
+// /reassign N <chatId> — owner-only transfer. Username→id resolution не делаем
+// (TG не позволяет надёжно получить chatId по username без предварительного
+// /start). Owner копирует chatId из /whoami у нужного ассистента.
+export async function handleReassign(ctx) {
+  if (ctx.role !== 'owner') {
+    await ctx.reply('Только owner может /reassign. Ассистент — /abandon, потом другой возьмёт.');
+    return;
+  }
+  const arg = (ctx.match || '').trim();
+  const m = arg.match(/^#?(\d+)\s+(\d+)\s*$/);
+  if (!m) {
+    await ctx.reply(
+      'Использование: /reassign <N> <chatId>\n\n' +
+      'Пример: /reassign 19 123456789\n\n' +
+      'chatId нового ассистента — /whoami у него в чате.'
+    );
+    return;
+  }
+  const issueNumber = Number(m[1]);
+  const newAssignee = m[2];
+  const oldAssignee = await getTaskAssignee(issueNumber);
+  if (oldAssignee) {
+    const theirActive = await getActiveTask(oldAssignee);
+    if (theirActive === issueNumber) {
+      await clearActiveTask(oldAssignee);
+    }
+  }
+  await setTaskAssignee(issueNumber, newAssignee);
+  await clearTaskBlocker(issueNumber);
+  try {
+    await commentOnIssue(issueNumber,
+      `🔁 **Reassigned by owner.** ${oldAssignee ? `\`${oldAssignee}\` → ` : ''}\`${newAssignee}\``
+    );
+  } catch (e) { console.warn('[reassign] commentOnIssue failed:', e.message); }
+  try {
+    await sendMessage(newAssignee,
+      `📥 Owner назначил тебе задачу #${issueNumber}. Открой /list → выбери её.`
+    );
+  } catch (e) { console.warn('[reassign] notify new assignee failed:', e.message); }
+  if (oldAssignee && oldAssignee !== newAssignee) {
+    try {
+      await sendMessage(oldAssignee,
+        `🔁 #${issueNumber} передана другому ассистенту owner'ом.`
+      );
+    } catch (e) { console.warn('[reassign] notify old assignee failed:', e.message); }
+  }
+  await ctx.reply(`🔁 #${issueNumber}: assignee ${oldAssignee || '(никого)'} → \`${newAssignee}\`.`,
+    { parse_mode: 'Markdown' });
 }
 
 export async function handleList(ctx) {
@@ -363,6 +623,129 @@ export async function handleList(ctx) {
 
 // M3c — Q30: batch pitch review. Lists ready-for-pitch issues with per-issue
 // action buttons. Owner taps [✅ Pitched] / [🔄 Revise] / [⏭ Skip].
+// Phase 1.4 — /stats: pipeline conversion analytics для owner. Считает по
+// labels через GitHub API (источник правды), pitchInfo из Redis для канала.
+export async function handleStats(ctx) {
+  if (ctx.role !== 'owner') {
+    await ctx.reply('Только owner видит /stats.');
+    return;
+  }
+  await ctx.reply('📊 Считаю…');
+
+  // Live pipeline (open) — все стадии до pitched.
+  const openLabels = [
+    [LABELS.SCOUTED,                 '🆕 scouted'],
+    ['approved',                     '✅ approved'],
+    ['researched',                   '🔬 researched'],
+    ['design-pending',               '🎨 design-pending'],
+    ['design-approved',              '✏️ design-approved'],
+    ['building',                     '🏗 building'],
+    [LABELS.BUILT,                   '🧱 built'],
+    [LABELS.NEEDS_VISUAL_REVIEW,     '📋 needs-visual-review'],
+    [LABELS.AWAITING_CLAUDE_PROCESS, '🤖 awaiting-claude-process'],
+    [LABELS.AWAITING_OWNER_REVIEW,   '🔵 awaiting-owner-review'],
+    [LABELS.READY_FOR_PITCH,         '🎉 ready-for-pitch'],
+    [LABELS.PITCHED,                 '📤 pitched'],
+  ];
+
+  const openCounts = {};
+  for (const [label, _] of openLabels) {
+    try {
+      const list = await listIssuesByLabel(label);
+      openCounts[label] = list.length;
+    } catch (e) {
+      openCounts[label] = `err:${e.message.slice(0, 30)}`;
+    }
+  }
+
+  // Closed outcomes — pull sold/lost/ghosted/wont-do.
+  const closedLabels = [
+    [LABELS.SOLD,    '💰 sold'],
+    [LABELS.LOST,    '❌ lost'],
+    ['ghosted',      '👻 ghosted'],
+    [LABELS.WONT_DO, '🚫 wont-do'],
+  ];
+  const closedCounts = {};
+  const closedIssues = {};
+  for (const [label, _] of closedLabels) {
+    try {
+      const list = await listIssuesByLabel(label, { state: 'closed' });
+      closedCounts[label] = list.length;
+      closedIssues[label] = list;
+    } catch (e) {
+      closedCounts[label] = `err:${e.message.slice(0, 30)}`;
+      closedIssues[label] = [];
+    }
+  }
+
+  const sold = Number(closedCounts[LABELS.SOLD]) || 0;
+  const lost = Number(closedCounts[LABELS.LOST]) || 0;
+  const ghosted = Number(closedCounts['ghosted']) || 0;
+  const totalResolved = sold + lost + ghosted;
+  const conv = totalResolved > 0 ? Math.round((sold / totalResolved) * 100) : null;
+
+  // Avg time pitched→closed для проданных. Берём issues с label=sold,
+  // если в Redis есть pitchInfo — считаем дельту от него; иначе используем
+  // closed_at - created_at как грубую прокси (ниже точности).
+  const soldIssues = closedIssues[LABELS.SOLD] || [];
+  let avgDaysToClose = null;
+  if (soldIssues.length) {
+    const deltas = [];
+    for (const i of soldIssues) {
+      const pitch = await getPitchInfo(i.number).catch(() => null);
+      const start = pitch?.at ? new Date(pitch.at).getTime() : new Date(i.created_at).getTime();
+      const end = new Date(i.closed_at || Date.now()).getTime();
+      const days = (end - start) / 86_400_000;
+      if (Number.isFinite(days) && days >= 0) deltas.push(days);
+    }
+    if (deltas.length) {
+      avgDaysToClose = Math.round((deltas.reduce((a, b) => a + b, 0) / deltas.length) * 10) / 10;
+    }
+  }
+
+  // Per-channel breakdown — собираем для всех resolved (sold/lost/ghosted).
+  const channelStats = {};
+  for (const status of [LABELS.SOLD, LABELS.LOST, 'ghosted']) {
+    for (const i of (closedIssues[status] || [])) {
+      const pitch = await getPitchInfo(i.number).catch(() => null);
+      const ch = pitch?.channel || 'unknown';
+      if (!channelStats[ch]) channelStats[ch] = { sold: 0, lost: 0, ghosted: 0 };
+      const k = status === LABELS.SOLD ? 'sold' : (status === LABELS.LOST ? 'lost' : 'ghosted');
+      channelStats[ch][k] += 1;
+    }
+  }
+
+  // Render.
+  const lines = ['📊 **Pipeline stats**', ''];
+  lines.push('*Активные:*');
+  for (const [label, display] of openLabels) {
+    const c = openCounts[label];
+    if (c === 0 || c === '0') continue;
+    lines.push(`  ${display}: ${c}`);
+  }
+  lines.push('');
+  lines.push('*Закрытые (всё время):*');
+  for (const [label, display] of closedLabels) {
+    lines.push(`  ${display}: ${closedCounts[label]}`);
+  }
+  lines.push('');
+  lines.push('*Conversion:*');
+  lines.push(`  sold / (sold+lost+ghosted) = ${conv === null ? '—' : conv + '%'}  (n=${totalResolved})`);
+  if (avgDaysToClose !== null) {
+    lines.push(`  avg days pitched→sold: ${avgDaysToClose}`);
+  }
+  if (Object.keys(channelStats).length) {
+    lines.push('');
+    lines.push('*По каналам:*');
+    for (const [ch, s] of Object.entries(channelStats)) {
+      const total = s.sold + s.lost + s.ghosted;
+      const cConv = total ? Math.round((s.sold / total) * 100) + '%' : '—';
+      lines.push(`  ${ch}: ${s.sold}/${total} sold (${cConv}), lost ${s.lost}, ghosted ${s.ghosted}`);
+    }
+  }
+  await ctx.reply(lines.join('\n'), { parse_mode: 'Markdown' });
+}
+
 export async function handlePitchReview(ctx) {
   if (ctx.role !== 'owner') {
     await ctx.reply('Только owner ревьюит готовые сайты.');
@@ -588,7 +971,7 @@ export async function handleSkip(ctx) {
   const task = await getCurrentTask(ctx.from.id);
   if (!task) { await ctx.reply('Нет текущей задачи. /list для выбора.'); return; }
   const arg = ctx.match?.trim();
-  if (!arg || !SECTION_BY_ID[arg]) {
+  if (!arg || !getSectionById(arg)) {
     await ctx.reply('Использование: /skip <section_id>. Список секций — /current.');
     return;
   }
@@ -892,7 +1275,7 @@ export async function handlePreview(ctx) {
   const who = ctx.from?.username ? `@${ctx.from.username}` : `Ассистент ${ctx.from?.id}`;
   const body = buildOwnerPush({ task, who, round: round || 1, state });
   // Per-section gallery shortcuts for sections that have at least one item.
-  const sectionsWithPhotos = SECTIONS
+  const sectionsWithPhotos = getSections()
     .map(s => s.id)
     .filter(id => (state.sections[id] || []).length > 0);
   const kb = sectionsWithPhotos.length > 0
@@ -912,7 +1295,7 @@ export async function handleRm(ctx) {
     return;
   }
   const [sectionId, nStr] = parts;
-  if (!SECTION_BY_ID[sectionId]) {
+  if (!getSectionById(sectionId)) {
     await ctx.reply(`Секция \`${sectionId}\` не найдена. Список — /current.`, { parse_mode: 'Markdown' });
     return;
   }
@@ -1007,7 +1390,7 @@ export async function handleUnskip(ctx) {
   const task = await getCurrentTask(ctx.from.id);
   if (!task) { await ctx.reply('Нет текущей задачи. /list для выбора.'); return; }
   const arg = ctx.match?.trim();
-  if (!arg || !SECTION_BY_ID[arg]) {
+  if (!arg || !getSectionById(arg)) {
     await ctx.reply('Использование: /unskip <section_id>. Список секций — /current.');
     return;
   }
@@ -1072,7 +1455,7 @@ async function runRebuild(ctx, { mode }) {
 // In `silent` mode error replies are suppressed (caller does its own summary).
 async function commitInputAndFlipLabel({ task, mode, ctx, fromLabel, silent = false }) {
   const sectionsOut = {};
-  for (const s of SECTIONS) {
+  for (const s of getSections()) {
     const files = await getPhotos(task.issue_number, s.id);
     sectionsOut[s.id] = {
       files: files.map(f => ({
@@ -1223,9 +1606,9 @@ export async function handleCallback(ctx) {
 
   if (data.startsWith('sec:')) {
     const sectionId = data.slice(4);
-    if (!SECTION_BY_ID[sectionId]) return;
+    const s = getSectionById(sectionId);
+    if (!s) return;
     await setActiveSection(ctx.from.id, sectionId);
-    const s = SECTION_BY_ID[sectionId];
     await ctx.reply(
       `${s.emoji} ${s.label}\nПришли ссылку / фото / видео для этой секции (опционально — можно вообще без неё).`
     );
@@ -1244,6 +1627,12 @@ export async function handleCallback(ctx) {
     const task = [...needsReview, ...awaitingOwner].find(t => t.issue_number === issueNumber);
     if (!task) {
       await ctx.reply(`Задача #${issueNumber} не найдена в активных. Попробуй /list.`);
+      return;
+    }
+    // Phase 1.2 — auto-claim ownership + WIP enforcement. Owner exempt.
+    const claim = await claimTaskOrFail(String(ctx.from.id), task.issue_number, ctx.role);
+    if (!claim.ok) {
+      await ctx.reply(claim.msg, { parse_mode: 'Markdown' });
       return;
     }
     // Save as current task for this user.
@@ -1330,6 +1719,14 @@ export async function handleCallback(ctx) {
       } catch (e) {
         await ctx.reply(`❌ setLabel failed: ${e.message}`);
       }
+    } else if (action === 'reject') {
+      // Phase 1.1 — explicit reject. Ask for reason, dispatch via cmd-pending
+      // so handleText picks it up next message. extras carries issueNumber.
+      await setCommandPending(String(ctx.from?.id), 'scout_reject', { issueNumber });
+      await ctx.reply(
+        `❌ #${issueNumber}: напиши одной строкой причину reject — отправлю в issue + сообщу ассистенту.\n\n` +
+        `Отмена — /cancel.`
+      );
     } else if (action === 'skip') {
       await ctx.reply(`⏭ #${issueNumber} пропущен в обзоре.`);
     } else if (action === 'open') {
@@ -1363,13 +1760,21 @@ export async function handleCallback(ctx) {
     const issueNumber = Number(nStr);
     if (!Number.isFinite(issueNumber)) return;
     if (action === 'pitched') {
-      try {
-        await setLabel(issueNumber, LABELS.PITCHED, LABELS.READY_FOR_PITCH);
-        await ctx.reply(`✅ #${issueNumber} → \`pitched\`. Ждём ответа клиента — потом /sold или /lost.`,
-          { parse_mode: 'Markdown' });
-      } catch (e) {
-        await ctx.reply(`❌ setLabel failed: ${e.message}`);
-      }
+      // Phase 1.3 — ask channel inline keyboard. Label transition happens
+      // in pitch_channel handler once channel chosen (avoids half-state if
+      // owner taps Pitched and walks away).
+      const kb = new InlineKeyboard()
+        .text('📸 IG', `pitch_channel:${issueNumber}:ig`)
+        .text('💬 Viber', `pitch_channel:${issueNumber}:viber`)
+        .text('📱 WA', `pitch_channel:${issueNumber}:wa`)
+        .row()
+        .text('✈️ TG', `pitch_channel:${issueNumber}:tg`)
+        .text('✉️ Email', `pitch_channel:${issueNumber}:email`)
+        .text('📞 Звонок', `pitch_channel:${issueNumber}:call`)
+        .row()
+        .text('🤷 Other', `pitch_channel:${issueNumber}:other`)
+        .text('❌ Отмена', `pitch_channel:${issueNumber}:cancel`);
+      await ctx.reply(`📤 #${issueNumber}: где запитчил клиенту?`, { reply_markup: kb });
     } else if (action === 'revise') {
       try {
         await setLabel(issueNumber, LABELS.NEEDS_VISUAL_REVIEW, LABELS.READY_FOR_PITCH);
@@ -1380,6 +1785,40 @@ export async function handleCallback(ctx) {
       }
     } else if (action === 'skip') {
       await ctx.reply(`⏭ #${issueNumber} пропущен в этом обзоре.`);
+    }
+    return;
+  }
+
+  // Phase 1.3 — pitch channel pick. `pitch_channel:N:ig|viber|wa|tg|email|call|other|cancel`.
+  if (data.startsWith('pitch_channel:')) {
+    if (ctx.role !== 'owner') return;
+    const [, nStr, channel] = data.split(':');
+    const issueNumber = Number(nStr);
+    if (!Number.isFinite(issueNumber)) return;
+    if (channel === 'cancel') {
+      await ctx.reply(`Отменено — #${issueNumber} остаётся \`ready-for-pitch\`.`,
+        { parse_mode: 'Markdown' });
+      return;
+    }
+    const labelMap = {
+      ig: 'Instagram DM', viber: 'Viber', wa: 'WhatsApp',
+      tg: 'Telegram', email: 'Email', call: 'Звонок', other: 'Other',
+    };
+    const channelLabel = labelMap[channel] || channel;
+    try {
+      await setPitchInfo(issueNumber, { channel });
+      await setLabel(issueNumber, LABELS.PITCHED, LABELS.READY_FOR_PITCH);
+      await commentOnIssue(issueNumber,
+        `📤 **Pitched via ${channelLabel}** at ${new Date().toISOString().slice(0, 10)}.`
+      ).catch(e => console.warn('[pitch_channel] commentOnIssue failed:', e.message));
+      await ctx.reply(
+        `✅ #${issueNumber} → \`pitched\` (${channelLabel}).\n\n` +
+        `Напомню через 3/7/14 дней. После 21d — предложу пометить как \`ghosted\`.\n` +
+        `Когда ответят — /sold или /lost.`,
+        { parse_mode: 'Markdown' }
+      );
+    } catch (e) {
+      await ctx.reply(`❌ pitch update failed: ${e.message}`);
     }
     return;
   }
@@ -1541,6 +1980,9 @@ export async function handleText(ctx) {
       case 'lost':     await processLostInput(ctx, text);    return;
       case 'ghosted':  await processGhostedInput(ctx, text); return;
       case 'approve':  await processApproveInput(ctx, text); return;
+      case 'scout_reject':
+        await processScoutRejectInput(ctx, text, Number(pending.extras?.issueNumber));
+        return;
       default: break; // unknown pending → fall through
     }
   }
