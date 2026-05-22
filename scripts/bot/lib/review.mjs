@@ -81,7 +81,9 @@ export function buildOwnerPush({ task, who, round, state }) {
   const roundTag = round > 1 ? `  🔁 Раунд ${round}` : '';
   lines.push(`🔔 ${who} прислал на ревью: ${task.venue_name || task.slug} #${task.issue_number}${roundTag}`);
 
-  // Photos block
+  // Photos block — counter line + optional sub-bullets for items that
+  // arrived with a user-supplied caption/instruction. URL-type items skip
+  // here (they get their own block below), so we don't duplicate.
   const photoLines = [];
   for (const s of SECTIONS) {
     const photos = sections[s.id] || [];
@@ -96,6 +98,14 @@ export function buildOwnerPush({ task, who, round, state }) {
     const hint = describePhotoSet(photos);
     const status = enough ? '✅' : (got > 0 ? '🟡' : '❌');
     photoLines.push(`${status} ${s.label}: ${got}/${required}${hint ? ` (${hint})` : ''}`);
+    // Sub-bullets: caption per item, only for tg_upload entries (urls have
+    // their own block below). Hide if no captions at all in section.
+    photos.forEach((p, idx) => {
+      if (p.source !== 'tg_upload') return;
+      const cap = (p.caption || '').trim();
+      if (!cap) return;
+      photoLines.push(`   ↳ #${idx + 1}: «${truncate(cap, 120)}»`);
+    });
   }
   if (photoLines.length) {
     lines.push('');
@@ -121,11 +131,14 @@ export function buildOwnerPush({ task, who, round, state }) {
   }
 
   // URL block (only URL-type photos, listed separately so owner sees what
-  // still needs downloading at rebuild time).
+  // still needs downloading at rebuild time). Per-item caption rendered as
+  // sub-bullet so instructions like "crop top" are visible without tapping.
   const urlEntries = [];
   for (const s of SECTIONS) {
     for (const p of (sections[s.id] || [])) {
-      if (p.source === 'url' && p.url) urlEntries.push({ url: p.url, section: s.label });
+      if (p.source === 'url' && p.url) {
+        urlEntries.push({ url: p.url, section: s.label, caption: p.caption || '' });
+      }
     }
   }
   if (urlEntries.length) {
@@ -133,6 +146,8 @@ export function buildOwnerPush({ task, who, round, state }) {
     lines.push(`🔗 Ссылки (${urlEntries.length}):`);
     for (const e of urlEntries) {
       lines.push(`• ${truncate(e.url, 80)} → ${e.section}`);
+      const cap = e.caption.trim();
+      if (cap) lines.push(`   ↳ «${truncate(cap, 120)}»`);
     }
   }
 
@@ -187,7 +202,11 @@ export function buildGalleryBatches(state) {
   for (const s of SECTIONS) {
     const photos = sections[s.id] || [];
     photos.forEach((p, idx) => {
-      const label = `[${s.id}] ${idx + 1}/${photos.length}`;
+      const positionLabel = `[${s.id}] ${idx + 1}/${photos.length}`;
+      const userCap = (p.caption || '').trim();
+      // Combine position label with user-supplied caption when present so
+      // the gallery shows both "where this belongs" and "what user asked".
+      const label = userCap ? `${positionLabel} — ${truncate(userCap, 200)}` : positionLabel;
       if (p.source === 'tg_upload' && p.type === 'photo') {
         all.push({ type: 'photo', media: p.file_id, caption: label });
       } else if (p.source === 'tg_upload' && p.type === 'video') {
