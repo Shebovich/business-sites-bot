@@ -1277,9 +1277,21 @@ async function runGallery(ctx, issueNumber, sectionFilter) {
   }
   for (const batch of batches) {
     try {
-      await sendMediaGroup(ctx.chat.id, batch);
+      // Use grammy's ctx methods rather than raw tgApi — grammy handles
+      // TG quirks (param encoding, retry-after) more gracefully and was
+      // observed to succeed where raw fetch returned 404 for sendPhoto.
+      if (batch.length === 1) {
+        const item = batch[0];
+        if (item.type === 'video') {
+          await ctx.replyWithVideo(item.media, { caption: item.caption });
+        } else {
+          await ctx.replyWithPhoto(item.media, { caption: item.caption });
+        }
+      } else {
+        await ctx.replyWithMediaGroup(batch);
+      }
     } catch (e) {
-      console.warn('[gallery] sendMediaGroup failed:', e.message);
+      console.warn('[gallery] media send failed:', e.message);
       console.warn('[gallery] batch payload:', JSON.stringify(batch));
       console.warn('[gallery] chat.id:', ctx.chat?.id, 'type:', ctx.chat?.type);
       await ctx.reply(`⚠️ Не смог отправить часть медиа: ${e.message}`);
