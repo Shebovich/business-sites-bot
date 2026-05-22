@@ -152,6 +152,16 @@ function getBot() {
       return;
     }
 
+    // Escape hatch: a real owner stuck in their own /role unknown override
+    // would otherwise be locked out of /role reset (middleware never calls
+    // next() for unknown role). Always allow /role through for the real
+    // owner so they can clear the override.
+    const msgText = ctx.message?.text || ctx.update?.message?.text || '';
+    if (realRole === 'owner' && /^\/role(\s|$|@)/.test(msgText)) {
+      await next();
+      return;
+    }
+
     // M3c — Q29 onboarding: tell the user their chat_id, push owner with
     // access request. Throttle via in-memory set (cold start resets).
     try {
