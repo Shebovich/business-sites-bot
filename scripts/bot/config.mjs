@@ -28,6 +28,9 @@ export const LABELS = {
   // Phase 1.1 — explicit reject path для /scout_review.
   // Issue закрывается с причиной + комментарий + push assignee.
   WONT_DO: 'wont-do',
+  // Phase 3.4 — design-director выводит 2 варианта, owner picks A/B в TG.
+  DESIGN_PENDING:  'design-pending',
+  DESIGN_APPROVED: 'design-approved',
 };
 
 // Sections a user can submit photos for. Each entry: id, label (RU display),

@@ -19,7 +19,7 @@ import { getCurrentTask, setCurrentTask, setActiveSection, getActiveSection,
          touchTask, setPitchInfo, getPitchInfo } from './state.mjs';
 import { buildTaskListKeyboard, buildSectionKeyboard,
          buildOwnerPushKeyboard, buildPreviewKeyboard } from './keyboard.mjs';
-import { LABELS, getEnv } from '../config.mjs';
+import { LABELS, GITHUB_REPO, getEnv } from '../config.mjs';
 import { getSections, getSectionById } from './sections.mjs';
 import { persistUrlInput, persistTgUpload } from './photo-handler.mjs';
 import { splitUrlAndCaption, parseTextEdit } from './text-parser.mjs';
@@ -1819,6 +1819,99 @@ export async function handleCallback(ctx) {
       );
     } catch (e) {
       await ctx.reply(`❌ pitch update failed: ${e.message}`);
+    }
+    return;
+  }
+
+  // Phase 3.4 — owner picks A/B variant из design-director moodboard.
+  // `design_pick:N:A|B|preview`. Preview шлёт contact-sheet.png из репо.
+  // A/B — коммент в issue + label design-pending → design-approved,
+  // process-tg-tasks skill подхватит и triggers builder Mode skeleton.
+  if (data.startsWith('design_pick:')) {
+    if (ctx.role !== 'owner') return;
+    const [, nStr, action] = data.split(':');
+    const issueNumber = Number(nStr);
+    if (!Number.isFinite(issueNumber)) return;
+    if (action === 'preview') {
+      // Try to send moodboard contact-sheet from main repo raw.
+      // Bot не знает slug заранее — берём из issue body (slug: ...).
+      const issue = await getIssue(issueNumber).catch(() => null);
+      const slugMatch = issue?.body?.match(/^\s*slug:\s*([a-z0-9-]+)/im);
+      const slug = slugMatch?.[1];
+      if (!slug) {
+        await ctx.reply(`⚠️ Не нашёл slug в #${issueNumber} body. Открой issue: ${issue?.html_url || '?'}`);
+        return;
+      }
+      const url = `https://raw.githubusercontent.com/${GITHUB_REPO}/main/_data/${slug}/moodboard/contact-sheet.png`;
+      await ctx.replyWithPhoto(url, {
+        caption: `🖼 Moodboard #${issueNumber} (${slug}). Выбери A или B из дизайн-брифа.`,
+      }).catch(async (e) => {
+        await ctx.reply(`⚠️ Moodboard не доступен (${e.message}). URL: ${url}`);
+      });
+      return;
+    }
+    if (action !== 'A' && action !== 'B') return;
+    const ownerName = ctx.from?.username ? `@${ctx.from.username}` : 'owner';
+    try {
+      await commentOnIssue(issueNumber,
+        `🎨 **Variant ${action} picked by ${ownerName}.**\n\n` +
+        `Builder Mode skeleton возьмёт chosen variant из design_brief.md ` +
+        `(secondary variant аннулируется).`
+      );
+      await setLabel(issueNumber, LABELS.DESIGN_APPROVED, LABELS.DESIGN_PENDING);
+      await ctx.reply(
+        `✅ #${issueNumber}: вариант ${action} → \`design-approved\`. ` +
+        `Builder Mode skeleton сейчас подхватит.`,
+        { parse_mode: 'Markdown' }
+      );
+    } catch (e) {
+      await ctx.reply(`❌ design_pick failed: ${e.message}`);
+    }
+    return;
+  }
+
+  // Phase 3.5 — done_review:N:approve|revise. Parallel-authority: и owner и
+  // assignee могут tap. Approve → ready-for-pitch, revise → needs-visual-review.
+  if (data.startsWith('done_review:')) {
+    const [, nStr, action] = data.split(':');
+    const issueNumber = Number(nStr);
+    if (!Number.isFinite(issueNumber)) return;
+    // Allow if owner, assignee, or person registered как assistant для issue.
+    const chatId = String(ctx.from?.id);
+    const assignee = await getTaskAssignee(issueNumber).catch(() => null);
+    const igAssignee = await getAssistantChatId(issueNumber).catch(() => null);
+    const authorized = ctx.role === 'owner' || assignee === chatId || igAssignee === chatId;
+    if (!authorized) {
+      await ctx.reply('Эту задачу могут закрыть только owner или assignee.');
+      return;
+    }
+    const who = ctx.from?.username ? `@${ctx.from.username}` : (ctx.from?.first_name || chatId);
+    if (action === 'approve') {
+      try {
+        await setLabel(issueNumber, LABELS.READY_FOR_PITCH, LABELS.BUILT);
+        await commentOnIssue(issueNumber,
+          `✅ **Approved as done by ${who}** — moved to \`ready-for-pitch\`.`
+        ).catch(() => {});
+        await ctx.reply(
+          `🎉 #${issueNumber} → \`ready-for-pitch\`. /pitch_review когда готов запитчить.`,
+          { parse_mode: 'Markdown' }
+        );
+      } catch (e) {
+        await ctx.reply(`❌ done_review approve failed: ${e.message}`);
+      }
+    } else if (action === 'revise') {
+      try {
+        await setLabel(issueNumber, LABELS.NEEDS_VISUAL_REVIEW, LABELS.BUILT);
+        await commentOnIssue(issueNumber,
+          `🔄 **Sent back for revision by ${who}** — back to \`needs-visual-review\`.`
+        ).catch(() => {});
+        await ctx.reply(
+          `🔄 #${issueNumber} → \`needs-visual-review\`. /list → выбери задачу и добавь правки.`,
+          { parse_mode: 'Markdown' }
+        );
+      } catch (e) {
+        await ctx.reply(`❌ done_review revise failed: ${e.message}`);
+      }
     }
     return;
   }

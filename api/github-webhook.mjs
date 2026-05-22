@@ -6,7 +6,8 @@
 import crypto from 'node:crypto';
 import { LABELS } from '../scripts/bot/config.mjs';
 import { sendMessage } from '../scripts/bot/lib/tg-api.mjs';
-import { registerActiveTask } from '../scripts/bot/lib/state.mjs';
+import { registerActiveTask, getTaskAssignee, getAssistantChatId } from '../scripts/bot/lib/state.mjs';
+import { InlineKeyboard } from 'grammy';
 
 export const config = { api: { bodyParser: false } };
 
@@ -69,7 +70,31 @@ export default async function handler(req, res) {
         `🆕 #${issue.number} — ждёт visual review\n\n${issue.title}\n${issue.html_url}\n\n/current чтобы открыть.`
       );
     } else if (label === LABELS.BUILT) {
-      await pushNotification(`✅ #${issue.number} обновлено, посмотри preview в issue: ${issue.html_url}`);
+      // Phase 3.5 — push BOTH (owner + assignee) с 3 кнопками после tester green.
+      const slug = extractSlug(issue.title);
+      const previewUrl = `https://${slug}.vercel.app`;
+      const kb = new InlineKeyboard()
+        .text('✅ Готово / В pitch', `done_review:${issue.number}:approve`)
+        .text('🔄 Ещё правки',       `done_review:${issue.number}:revise`)
+        .row()
+        .url('📲 Открыть preview',   previewUrl);
+      const text = `🧱 #${issue.number} собран (${slug}).\n\n` +
+                   `Preview: ${previewUrl}\nIssue: ${issue.html_url}\n\n` +
+                   `[✅ Готово] → ready-for-pitch · [🔄 Ещё правки] → новый круг.`;
+      await pushBoth(issue.number, text, { reply_markup: kb });
+    } else if (label === LABELS.DESIGN_PENDING) {
+      // Phase 3.4 — push owner с inline A/B + preview moodboard.
+      const kb = new InlineKeyboard()
+        .text('🅰 Variant A', `design_pick:${issue.number}:A`)
+        .text('🅱 Variant B', `design_pick:${issue.number}:B`)
+        .row()
+        .text('🖼 Moodboard', `design_pick:${issue.number}:preview`);
+      await pushNotification(
+        `🎨 #${issue.number} — design-director выдал 2 варианта.\n\n` +
+        `${issue.title}\n${issue.html_url}\n\n` +
+        `Открой design_brief.md в issue, выбери A или B.`,
+        { reply_markup: kb }
+      );
     } else if (label === LABELS.READY_FOR_PITCH) {
       // M3c — Q30 quiet push: single line, no buttons. Batch review via /pitch_review.
       await pushNotification(`🎉 #${issue.number} готов к pitch — /pitch_review`);
@@ -103,11 +128,28 @@ function extractRequestedBy(body) {
   return m ? m[1] : null;
 }
 
-async function pushNotification(text) {
+async function pushNotification(text, extra = {}) {
   const chatId = process.env.TG_OWNER_CHAT_ID;
   if (!chatId) {
     console.warn('[gh-webhook] TG_OWNER_CHAT_ID not set — skipping push');
     return;
   }
-  await sendMessage(chatId, text);
+  await sendMessage(chatId, text, extra);
+}
+
+// Phase 3.5 — parallel-authority push. Owner + assignee оба получают
+// сообщение и могут tap «Готово» / «Ещё правки». De-dup если они один
+// и тот же chatId.
+async function pushBoth(issueNumber, text, extra = {}) {
+  const ownerId = process.env.TG_OWNER_CHAT_ID;
+  const assignee = await getTaskAssignee(issueNumber).catch(() => null);
+  const igAssignee = await getAssistantChatId(issueNumber).catch(() => null);
+  const targets = new Set([ownerId, assignee, igAssignee].filter(Boolean));
+  for (const chatId of targets) {
+    try {
+      await sendMessage(chatId, text, extra);
+    } catch (e) {
+      console.warn(`[gh-webhook] pushBoth → ${chatId} failed:`, e.message);
+    }
+  }
 }
