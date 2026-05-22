@@ -281,10 +281,18 @@ export async function clearTask(issueNumber) {
 }
 
 // ---- M3a: full state wipe on /approve (Q22b) -----------------------------
-// Unlike clearTask above, this scans for every `task:{N}:*` key — including
-// per-section photo lists, round counter, hash, assistant_chat_id — so the
-// next visual-review session for the same slug starts clean. Mirrors the
-// logic in scripts/bot/clear-task.mjs (CLI helper) for the in-bot path.
+// Unlike clearTask above, this scans for every `task:{N}:*` key — per-section
+// photo lists, round counter, hash, etc. — so the next visual-review session
+// for the same slug starts clean. Mirrors the logic in scripts/bot/clear-task.mjs
+// (CLI helper) for the in-bot path.
+//
+// Exception: `assistant_chat_id` is preserved permanently. It's routing info,
+// not session data — the bot needs it after approve (and after sold/lost) so
+// /api/task/notify can still push completion/needs-fix updates to the original
+// assistant. Issue numbers are never reused by GitHub, so the keys don't
+// accumulate problematically.
+const PRESERVED_SUFFIXES = [':assistant_chat_id'];
+
 export async function clearTaskState(issueNumber) {
   const r = getRedis();
   const prefix = `task:${issueNumber}:`;
@@ -293,7 +301,10 @@ export async function clearTaskState(issueNumber) {
   do {
     const [next, batch] = await r.scan(cursor, { match: `${prefix}*`, count: 100 });
     cursor = Number(next);
-    for (const k of batch) allKeys.push(k);
+    for (const k of batch) {
+      if (PRESERVED_SUFFIXES.some(suffix => k.endsWith(suffix))) continue;
+      allKeys.push(k);
+    }
   } while (cursor !== 0);
 
   await r.srem(K.activeList(), String(issueNumber));
