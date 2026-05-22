@@ -30,8 +30,21 @@ export async function sendMessage(chatId, text, extra = {}) {
   return await tgApi('sendMessage', { chat_id: chatId, text, ...extra });
 }
 
-// `media` is an array of `{type, media, caption?}` — TG accepts up to 10 per
+// `media` is an array of `{type, media, caption?}` — TG accepts 2-10 per
 // call. Caller is responsible for batching (see review.mjs buildGalleryBatches).
+// Single-item batches fall back to sendPhoto/sendVideo because TG rejects
+// media_group with fewer than 2 items.
 export async function sendMediaGroup(chatId, media) {
+  if (media.length === 0) return null;
+  if (media.length === 1) {
+    const item = media[0];
+    const method = item.type === 'video' ? 'sendVideo' : 'sendPhoto';
+    const fileField = item.type === 'video' ? 'video' : 'photo';
+    return await tgApi(method, {
+      chat_id: chatId,
+      [fileField]: item.media,
+      caption: item.caption,
+    });
+  }
   return await tgApi('sendMediaGroup', { chat_id: chatId, media });
 }
