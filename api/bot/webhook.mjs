@@ -14,9 +14,8 @@ import {
   handleCallback, handlePhoto, handleVideo, handleText,
 } from '../../scripts/bot/lib/commands.mjs';
 import { assertEnv, getEnv } from '../../scripts/bot/config.mjs';
-import { sendMessage } from '../../scripts/bot/lib/tg-api.mjs';
 import { getRoleOverride, isApprovedAssistant,
-         setPendingAccess, getPendingAccess } from '../../scripts/bot/lib/state.mjs';
+         setPendingAccess, getPendingAccess, refreshPendingPing } from '../../scripts/bot/lib/state.mjs';
 import { InlineKeyboard } from 'grammy';
 
 export const config = { api: { bodyParser: false } };
@@ -183,36 +182,52 @@ function getBot() {
         ? '\n\n<i>(role override active — /role reset чтобы вернуться в owner)</i>'
         : '';
 
-      // If we already have a pending request from this chat, reply with a
-      // soft reminder instead of re-pinging owner.
       const pending = realRole !== 'owner' ? await getPendingAccess(fromId).catch(() => null) : null;
+
+      // Decide whether to send owner-ping. We ping if:
+      //   - This is a fresh request (no pending entry yet), OR
+      //   - Pending exists but last_pinged_at was > 30 min ago (self-healing:
+      //     if a previous ping failed due to e.g. transient TG outage, we
+      //     retry instead of leaving the user stuck for 7 days).
+      // Throttled by in-memory Set within a warm instance to keep cold-start
+      // retries from spamming the owner if many messages arrive at once.
+      const COOLDOWN_MS = 30 * 60 * 1000;
+      const lastPingedAt = pending?.last_pinged_at ? new Date(pending.last_pinged_at).getTime() : 0;
+      const cooldownPassed = (Date.now() - lastPingedAt) > COOLDOWN_MS;
+      const shouldPing = realRole !== 'owner'
+        && OWNER_ID
+        && !onboardingPinged.has(fromId)
+        && (!pending || cooldownPassed);
+
+      // Reply to requester. Phrasing reflects state.
       if (pending) {
         await ctx.reply(
           `🕓 Твой запрос на рассмотрении у owner'а. Дождись решения — оно прилетит сюда.${overrideNote}`,
           { parse_mode: 'HTML' }
         );
-        return;
+      } else {
+        await ctx.reply(
+          `👋 Привет. Я бот ревью сайтов Shebovich.\n\n` +
+          `Твой chat_id: <code>${fromId}</code>\n\n` +
+          `🕓 Запрос отправлен owner'у. Жди ответа — он прилетит сюда.${overrideNote}`,
+          { parse_mode: 'HTML' }
+        );
       }
 
-      await ctx.reply(
-        `👋 Привет. Я бот ревью сайтов Shebovich.\n\n` +
-        `Твой chat_id: <code>${fromId}</code>\n\n` +
-        `🕓 Запрос отправлен owner'у. Жди ответа — он прилетит сюда.${overrideNote}`,
-        { parse_mode: 'HTML' }
-      );
-
-      // Skip owner-ping when we're just simulating unknown via override —
-      // owner is the same person who triggered it.
-      if (OWNER_ID && realRole !== 'owner' && !onboardingPinged.has(fromId)) {
+      if (shouldPing) {
         onboardingPinged.add(fromId);
-        await setPendingAccess(fromId, { username, first_name: firstName }).catch(() => {});
+        if (pending) {
+          await refreshPendingPing(fromId).catch(() => {});
+        } else {
+          await setPendingAccess(fromId, { username, first_name: firstName }).catch(() => {});
+        }
 
         const safe = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
         const displayName = username ? safe(username) : (firstName ? safe(firstName) : '(no username)');
         const kb = new InlineKeyboard()
           .text('✅ Approve', `access:approve:${fromId}`)
           .text('❌ Reject', `access:reject:${fromId}`);
-        await sendMessage(OWNER_ID,
+        await bot.api.sendMessage(OWNER_ID,
           `🔔 Запрос доступа:\n• ${displayName}\n• id <code>${fromId}</code>\n\n` +
           `Тапни кнопку, бот сам ответит требующему.`,
           { parse_mode: 'HTML', reply_markup: kb }

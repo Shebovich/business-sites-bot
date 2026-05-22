@@ -108,6 +108,20 @@ export async function setPendingAccess(chatId, meta) {
     username: meta.username || '',
     first_name: meta.first_name || '',
     requested_at: new Date().toISOString(),
+    last_pinged_at: new Date().toISOString(),
+  });
+  await getRedis().set(K.pendingAccess(chatId), value, { ex: PENDING_ACCESS_TTL });
+}
+
+// Refresh the last_pinged_at marker without resetting requested_at.
+// Used to self-heal: if owner-ping failed previously, next interaction
+// retriggers ping after a cooldown (avoids spam if owner-ping is slow).
+export async function refreshPendingPing(chatId) {
+  const cur = await getPendingAccess(chatId);
+  if (!cur) return;
+  const value = JSON.stringify({
+    ...cur,
+    last_pinged_at: new Date().toISOString(),
   });
   await getRedis().set(K.pendingAccess(chatId), value, { ex: PENDING_ACCESS_TTL });
 }
