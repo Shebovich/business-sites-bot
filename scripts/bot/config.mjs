@@ -28,12 +28,17 @@ export const LABELS = {
 };
 
 // Sections a user can submit photos for. Each entry: id, label (RU display),
-// emoji, min_count (required count for /done-all gate), required flag.
-// Mirrors Q13 mandatory + Q14 photo_assignments.
+// emoji, suggested_count (informational hint shown in /current — not a gate;
+// /submit and /done_all accept any state, owner decides on review),
+// accepts_video flag.
+//
+// `required` and `min_count` kept for back-compat but no longer block flow.
+// `required: false` everywhere; previously enforced by gate logic that was
+// removed when the contract shifted to "assistant collects, owner reviews".
 export const SECTIONS = [
-  { id: 'hero',                 label: 'Hero (видео процесса)',     emoji: '🎬', min_count: 1, required: true,  accepts_video: true },
-  { id: 'above_fold_thumbs',    label: 'Above-fold блюда',          emoji: '🍽', min_count: 3, required: true,  accepts_video: false },
-  { id: 'menu_full',            label: 'Меню (карточки)',           emoji: '📋', min_count: 4, required: true,  accepts_video: false },
+  { id: 'hero',                 label: 'Hero (видео процесса)',     emoji: '🎬', min_count: 1, required: false, accepts_video: true },
+  { id: 'above_fold_thumbs',    label: 'Above-fold блюда',          emoji: '🍽', min_count: 3, required: false, accepts_video: false },
+  { id: 'menu_full',            label: 'Меню (карточки)',           emoji: '📋', min_count: 4, required: false, accepts_video: false },
   { id: 'interior_unique',      label: 'Интерьер',                  emoji: '🪑', min_count: 3, required: false, accepts_video: false },
   { id: 'private_dining',       label: 'Банкетный зал',             emoji: '🏛', min_count: 2, required: false, accepts_video: false },
   { id: 'signature_dishes',     label: 'Фирменные блюда',           emoji: '⭐️', min_count: 3, required: false, accepts_video: false },

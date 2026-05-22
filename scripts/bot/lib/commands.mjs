@@ -1092,7 +1092,7 @@ export async function handleCallback(ctx) {
     await setActiveSection(ctx.from.id, sectionId);
     const s = SECTION_BY_ID[sectionId];
     await ctx.reply(
-      `${s.emoji} ${s.label}\nПришли ссылку / фото / видео для этой секции.\nМинимум: ${s.min_count}.`
+      `${s.emoji} ${s.label}\nПришли ссылку / фото / видео для этой секции (опционально — можно вообще без неё).`
     );
     return;
   }

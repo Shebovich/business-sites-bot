@@ -29,11 +29,10 @@ export async function buildSectionKeyboard(issueNumber) {
 }
 
 function renderSectionButton(section, count, isSkipped) {
-  const { emoji, label, min_count } = section;
+  const { emoji, label } = section;
   if (isSkipped) return `${emoji} ${label} — ⏭ skipped`;
-  if (count >= min_count) return `${emoji} ${label} — ✅ ${count}/${min_count}`;
-  if (count > 0)          return `${emoji} ${label} — ${count}/${min_count}`;
-  return `${emoji} ${label} (нужно ${min_count})`;
+  if (count > 0) return `${emoji} ${label} — ${count}`;
+  return `${emoji} ${label}`;
 }
 
 // Keyboard for /list — one row per active task.

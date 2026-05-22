@@ -81,25 +81,22 @@ export function buildOwnerPush({ task, who, round, state }) {
   const roundTag = round > 1 ? `  🔁 Раунд ${round}` : '';
   lines.push(`🔔 ${who} прислал на ревью: ${task.venue_name || task.slug} #${task.issue_number}${roundTag}`);
 
-  // Photos block — counter line + optional sub-bullets for items that
-  // arrived with a user-supplied caption/instruction. URL-type items skip
-  // here (they get their own block below), so we don't duplicate.
+  // Photos block — show only sections that have content or were explicitly
+  // skipped. Owner reviews any state; assistants no longer need to satisfy
+  // section quotas to submit, so there's no point listing empty sections
+  // with red ❌ — that just nags about a non-requirement.
   const photoLines = [];
   for (const s of SECTIONS) {
     const photos = sections[s.id] || [];
-    if (photos.length === 0 && !s.required && !skipped.includes(s.id)) continue;
     if (skipped.includes(s.id)) {
       photoLines.push(`⏭ ${s.label}: пропущена`);
       continue;
     }
-    const required = s.min_count;
-    const got = photos.length;
-    const enough = got >= required;
+    if (photos.length === 0) continue;
     const hint = describePhotoSet(photos);
-    const status = enough ? '✅' : (got > 0 ? '🟡' : '❌');
-    photoLines.push(`${status} ${s.label}: ${got}/${required}${hint ? ` (${hint})` : ''}`);
+    photoLines.push(`• ${s.label}: ${photos.length}${hint ? ` (${hint})` : ''}`);
     // Sub-bullets: caption per item, only for tg_upload entries (urls have
-    // their own block below). Hide if no captions at all in section.
+    // their own block below).
     photos.forEach((p, idx) => {
       if (p.source !== 'tg_upload') return;
       const cap = (p.caption || '').trim();
@@ -162,6 +159,14 @@ export function buildOwnerPush({ task, who, round, state }) {
         : 'общая';
       lines.push(`${idx + 1}. [${where}] ${truncate(n.text, 200)}`);
     });
+  }
+
+  // Empty-state hint: if assistant submitted with nothing collected, owner
+  // would otherwise see just the header line — easy to mistake for a bug.
+  // Make the "submitted as-is" intent explicit.
+  if (lines.length === 1) {
+    lines.push('');
+    lines.push('(Без приложенных файлов или заметок — ассистент просит проревьюить задачу как есть.)');
   }
 
   let body = lines.join('\n');
