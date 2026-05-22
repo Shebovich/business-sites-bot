@@ -44,7 +44,33 @@ const K = {
   feedbackPending:  (chatId) => `task:feedback_pending:${chatId}`,
   // M3.1 — free-form notes per task. Each entry is JSON with section + text.
   notes:            (issueNumber) => `task:${issueNumber}:notes`,
+  // Debug: owner-only role override for testing assistant/unknown flows
+  // without needing a second TG account. TTL'd so it can't accidentally
+  // lock owner out of their own commands forever.
+  roleOverride:     (chatId) => `role-override:${chatId}`,
 };
+
+// ---- Role override (debug) -----------------------------------------------
+
+// TTL in seconds — long enough for a test session, short enough that a
+// forgotten override silently expires.
+const ROLE_OVERRIDE_TTL = 30 * 60;
+
+export async function getRoleOverride(chatId) {
+  return await getRedis().get(K.roleOverride(chatId));
+}
+
+export async function setRoleOverride(chatId, role) {
+  await getRedis().set(K.roleOverride(chatId), role, { ex: ROLE_OVERRIDE_TTL });
+}
+
+export async function clearRoleOverride(chatId) {
+  await getRedis().del(K.roleOverride(chatId));
+}
+
+export async function getRoleOverrideTtl(chatId) {
+  return await getRedis().ttl(K.roleOverride(chatId));
+}
 
 // ---- Current task --------------------------------------------------------
 

@@ -8,7 +8,8 @@ import { getCurrentTask, setCurrentTask, setActiveSection, getActiveSection,
          getAssistantChatId, setAssistantChatId,
          getFeedbackPending, setFeedbackPending, clearFeedbackPending,
          removePhotoAt, unskipSection,
-         addNote, getNotes, removeNoteAt, clearNotes } from './state.mjs';
+         addNote, getNotes, removeNoteAt, clearNotes,
+         getRoleOverride, setRoleOverride, clearRoleOverride, getRoleOverrideTtl } from './state.mjs';
 import { buildTaskListKeyboard, buildSectionKeyboard,
          buildOwnerPushKeyboard, buildPreviewKeyboard } from './keyboard.mjs';
 import { SECTIONS, SECTION_BY_ID, LABELS, getEnv } from '../config.mjs';
@@ -70,8 +71,81 @@ export async function handleWhoami(ctx) {
   const id = ctx.from?.id;
   const username = ctx.from?.username ? `@${ctx.from.username}` : '(no username)';
   const role = ctx.role || 'unknown';
+  const realRole = ctx.realRole;
+  let overrideLine = '';
+  if (realRole && realRole !== role) {
+    const ttl = await getRoleOverrideTtl(String(id)).catch(() => null);
+    const ttlNote = (ttl && ttl > 0) ? ` (ещё ${Math.ceil(ttl / 60)} мин)` : '';
+    overrideLine = `\nReal role: ${realRole} <i>(override active${ttlNote} — /role reset)</i>`;
+  }
   await ctx.reply(
-    `Ты: ${escapeHtml(username)}\nchat_id: <code>${id}</code>\nРоль: ${role}`,
+    `Ты: ${escapeHtml(username)}\nchat_id: <code>${id}</code>\nРоль: ${role}${overrideLine}`,
+    { parse_mode: 'HTML' }
+  );
+}
+
+// Owner-only debug: temporarily downgrade effective role so the same chat
+// can test assistant/unknown flows without juggling TG accounts. TTL'd in
+// Redis (30 min) so a forgotten override silently expires.
+//
+// Usage:
+//   /role              — show current state
+//   /role assistant    — act as assistant
+//   /role unknown      — act as unknown (triggers onboarding flow)
+//   /role owner | reset — clear override
+export async function handleRole(ctx) {
+  // Only the real owner may toggle this. ctx.realRole is set by middleware;
+  // ctx.role may already be overridden so we can't trust it for auth.
+  if (ctx.realRole !== 'owner') {
+    await ctx.reply('Эта команда только для owner.');
+    return;
+  }
+  const arg = (ctx.match || '').trim().toLowerCase();
+  const fromId = String(ctx.from?.id ?? '');
+
+  if (!arg) {
+    const current = await getRoleOverride(fromId);
+    const ttl = current ? await getRoleOverrideTtl(fromId).catch(() => null) : null;
+    if (!current) {
+      await ctx.reply(
+        'Override не установлен — ты owner.\n\n' +
+        'Доступные команды:\n' +
+        '<code>/role assistant</code> — тестировать как assistant\n' +
+        '<code>/role unknown</code> — тестировать onboarding-flow\n' +
+        '<code>/role reset</code> — снять override досрочно',
+        { parse_mode: 'HTML' }
+      );
+    } else {
+      const ttlNote = (ttl && ttl > 0) ? ` (истечёт через ${Math.ceil(ttl / 60)} мин)` : '';
+      await ctx.reply(
+        `Override: <code>${current}</code>${ttlNote}\n\n` +
+        '<code>/role reset</code> — снять досрочно',
+        { parse_mode: 'HTML' }
+      );
+    }
+    return;
+  }
+
+  if (arg === 'reset' || arg === 'owner') {
+    await clearRoleOverride(fromId);
+    await ctx.reply('✅ Override снят. Ты снова owner.');
+    return;
+  }
+
+  if (arg !== 'assistant' && arg !== 'unknown') {
+    await ctx.reply(
+      'Неизвестный аргумент. Доступно: <code>assistant</code>, <code>unknown</code>, <code>reset</code>.',
+      { parse_mode: 'HTML' }
+    );
+    return;
+  }
+
+  await setRoleOverride(fromId, arg);
+  const desc = arg === 'assistant'
+    ? 'теперь ведёшь себя как ассистент. /help и /playbook покажут assistant-команды. Owner-only хендлеры должны отказать.'
+    : 'теперь ведёшь себя как unknown. Любое сообщение → onboarding-ответ. Сними /role reset когда закончишь.';
+  await ctx.reply(
+    `✅ Override: <code>${arg}</code> (30 мин)\n\n${desc}`,
     { parse_mode: 'HTML' }
   );
 }

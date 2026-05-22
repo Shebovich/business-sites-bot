@@ -8,13 +8,14 @@ import {
   handleSubmit, handleOwnerReview,
   handleApprove, handleApproveAll, handlePreview, handleRm, handleUnskip,
   handleNote, handleNotes, handleRmNote, handleClearNotes,
-  handleWhoami, handlePlaybook,
+  handleWhoami, handlePlaybook, handleRole,
   handlePitchReview, handleSold, handleLost, handleGhosted,
   handleScout, handleScoutReview,
   handleCallback, handlePhoto, handleVideo, handleText,
 } from '../../scripts/bot/lib/commands.mjs';
 import { assertEnv, getEnv } from '../../scripts/bot/config.mjs';
 import { sendMessage } from '../../scripts/bot/lib/tg-api.mjs';
+import { getRoleOverride } from '../../scripts/bot/lib/state.mjs';
 
 export const config = { api: { bodyParser: false } };
 
@@ -64,6 +65,7 @@ const OWNER_COMMANDS = [
   { command: 'ghosted',      description: 'N — клиент молчит' },
   { command: 'scout',        description: 'Следующий лид или ad-hoc' },
   { command: 'scout_review', description: 'Inbox новых scouted' },
+  { command: 'role',         description: 'Debug: смена эффективной роли (30 мин)' },
 ];
 
 async function registerCommandsOnce(token, ownerId, assistantIds) {
@@ -124,38 +126,60 @@ function getBot() {
 
   bot.use(async (ctx, next) => {
     const fromId = String(ctx.from?.id ?? '');
-    if (OWNER_ID && fromId === OWNER_ID) {
-      ctx.role = 'owner';
-    } else if (ASSISTANT_IDS.includes(fromId)) {
-      ctx.role = 'assistant';
-    } else {
-      // M3c — Q29 onboarding: instead of silently ignoring, tell the user
-      // their chat_id so they can forward it to owner. Also push owner with
-      // the access request. Throttle is best-effort via in-memory set (cold
-      // start resets it — that's fine, owner won't see duplicates often).
+
+    // Resolve real role from whitelist.
+    let realRole;
+    if (OWNER_ID && fromId === OWNER_ID) realRole = 'owner';
+    else if (ASSISTANT_IDS.includes(fromId)) realRole = 'assistant';
+    else realRole = 'unknown';
+
+    // Debug override (owner-only feature, see /role command). Only owners may
+    // downgrade their effective role for testing — escalation is impossible.
+    let effectiveRole = realRole;
+    if (realRole === 'owner') {
       try {
-        const username = ctx.from?.username ? `@${ctx.from.username}` : '(no username)';
-        await ctx.reply(
-          `👋 Привет. Я бот ревью сайтов Shebovich.\n\n` +
-          `Твой chat_id: <code>${fromId}</code>\n\n` +
-          `Перешли этот id Pavel — он добавит тебя в whitelist. Я тебя пока игнорю.`,
-          { parse_mode: 'HTML' }
-        );
-        if (OWNER_ID && !onboardingPinged.has(fromId)) {
-          onboardingPinged.add(fromId);
-          const safeUsername = username.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-          await sendMessage(OWNER_ID,
-            `🔔 Новый chat_id хочет доступ:\n• ${safeUsername}\n• id <code>${fromId}</code>\n\n` +
-            `Добавь в <code>TG_ASSISTANT_CHAT_IDS</code> через Vercel env, потом redeploy.`,
-            { parse_mode: 'HTML' }
-          ).catch(() => {});
-        }
+        const override = await getRoleOverride(fromId);
+        if (override && override !== 'owner') effectiveRole = override;
       } catch (e) {
-        console.warn(`[bot] onboarding reply failed for ${fromId}:`, e.message);
+        console.warn(`[bot] role-override lookup failed for ${fromId}:`, e.message);
       }
+    }
+    ctx.role = effectiveRole;
+    ctx.realRole = realRole;
+
+    if (effectiveRole !== 'unknown') {
+      await next();
       return;
     }
-    await next();
+
+    // M3c — Q29 onboarding: tell the user their chat_id, push owner with
+    // access request. Throttle via in-memory set (cold start resets).
+    try {
+      const username = ctx.from?.username ? `@${ctx.from.username}` : '(no username)';
+      const overrideNote = realRole === 'owner'
+        ? '\n\n<i>(role override active — /role reset чтобы вернуться в owner)</i>'
+        : '';
+      await ctx.reply(
+        `👋 Привет. Я бот ревью сайтов Shebovich.\n\n` +
+        `Твой chat_id: <code>${fromId}</code>\n\n` +
+        `Перешли этот id Pavel — он добавит тебя в whitelist. Я тебя пока игнорю.` +
+        overrideNote,
+        { parse_mode: 'HTML' }
+      );
+      // Skip owner-ping when we're just simulating unknown via override —
+      // owner is the same person who triggered it.
+      if (OWNER_ID && realRole !== 'owner' && !onboardingPinged.has(fromId)) {
+        onboardingPinged.add(fromId);
+        const safeUsername = username.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        await sendMessage(OWNER_ID,
+          `🔔 Новый chat_id хочет доступ:\n• ${safeUsername}\n• id <code>${fromId}</code>\n\n` +
+          `Добавь в <code>TG_ASSISTANT_CHAT_IDS</code> через Vercel env, потом redeploy.`,
+          { parse_mode: 'HTML' }
+        ).catch(() => {});
+      }
+    } catch (e) {
+      console.warn(`[bot] onboarding reply failed for ${fromId}:`, e.message);
+    }
   });
 
   bot.command('start',        handleStart);
@@ -179,6 +203,7 @@ function getBot() {
   bot.command('approve_all',  handleApproveAll);
   bot.command('whoami',       handleWhoami);
   bot.command('playbook',     handlePlaybook);
+  bot.command('role',         handleRole);
   bot.command('pitch_review', handlePitchReview);
   bot.command('sold',         handleSold);
   bot.command('lost',         handleLost);
