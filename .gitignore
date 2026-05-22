@@ -2,40 +2,11 @@ node_modules/
 *.log
 .DS_Store
 Thumbs.db
-*.rar
-*.zip
-# Binary installers — могут случайно попасть в _data/ и сломать push (>100MB)
-*.exe
-*.msi
-*.dmg
-*.iso
 
-# Секреты пайплайна — API ключи 2GIS и т.п.
+# Local env (TG token, Redis creds, GH token)
 .env
 .env.local
-
-# Рабочие артефакты scout/builder/tester агентов
-_data/.candidates.json
-_data/.verified.json
-_data/.scouted.json
-_data/.issue-body.md
-_data/.test-report.json
-_data/screenshots/
-
-# IG сессия — личные cookies/storage юзера (НЕ коммитить)
-_data/.ig-profile/
-_data/.ig-storage.json
-
-# Worktrees агентов и IDE
-.claude/worktrees/
-.idea/
-
-# Vercel — игнорируем build output, но коммитим project.json для CI/CD
-.vercel/output/
-.vercel/.vc-config.json
-
-# Разрешаем project.json во всех подпапках (нужен для GitHub Actions)
-!**/.vercel/
-!**/.vercel/project.json
-.vercel
 .env*.local
+
+# Vercel link/state — recreated by `vercel link`
+.vercel/

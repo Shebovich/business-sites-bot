@@ -25,7 +25,7 @@ function loadEnvFile(p) {
 }
 for (const f of ['.env', '.env.local']) loadEnvFile(resolve(process.cwd(), f));
 
-const REPO = 'Shebovich/business-sites';
+const REPO = (process.env.GITHUB_REPO || 'Shebovich/business-sites').trim();
 const TOKEN = process.env.GH_TOKEN || process.env.GITHUB_TOKEN;
 if (!TOKEN) {
   console.error('GH_TOKEN not set — `node scripts/bot/pull-env.mjs` first.');

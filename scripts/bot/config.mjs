@@ -1,7 +1,9 @@
 // Shared constants for the visual-review TG bot.
 // Single source of truth — used by webhook handlers, GitHub Actions, dev runner.
 
-export const GITHUB_REPO = 'Shebovich/business-sites';
+// Overridable via env so the same bot binary can target a different sites
+// repo (e.g. staging fork) without code change. Default preserves history.
+export const GITHUB_REPO = (process.env.GITHUB_REPO || 'Shebovich/business-sites').trim();
 
 // Issue labels that drive the state machine
 export const LABELS = {

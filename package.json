@@ -1,14 +1,16 @@
 {
-  "name": "business-sites",
+  "name": "business-sites-bot",
   "version": "1.0.0",
   "private": true,
   "type": "module",
+  "description": "Telegram bot for visual-review pipeline of Shebovich/business-sites.",
   "scripts": {
-    "bot:set-webhook": "node scripts/bot/set-webhook.mjs",
-    "bot:dev": "node scripts/bot/dev.mjs"
-  },
-  "devDependencies": {
-    "@playwright/test": "^1.60.0"
+    "dev": "node scripts/bot/dev.mjs",
+    "set-webhook": "node scripts/bot/set-webhook.mjs",
+    "set-commands": "node scripts/bot/set-commands.mjs",
+    "pull-env": "node scripts/bot/pull-env.mjs",
+    "bot:dev": "node scripts/bot/dev.mjs",
+    "bot:set-webhook": "node scripts/bot/set-webhook.mjs"
   },
   "dependencies": {
     "@upstash/redis": "^1.34.3",
