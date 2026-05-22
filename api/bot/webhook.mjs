@@ -15,7 +15,8 @@ import {
 } from '../../scripts/bot/lib/commands.mjs';
 import { assertEnv, getEnv } from '../../scripts/bot/config.mjs';
 import { getRoleOverride, isApprovedAssistant,
-         setPendingAccess, getPendingAccess, refreshPendingPing } from '../../scripts/bot/lib/state.mjs';
+         setPendingAccess, getPendingAccess, refreshPendingPing,
+         clearCommandPending } from '../../scripts/bot/lib/state.mjs';
 import { InlineKeyboard } from 'grammy';
 
 export const config = { api: { bodyParser: false } };
@@ -158,6 +159,14 @@ function getBot() {
     ctx.realRole = realRole;
 
     if (effectiveRole !== 'unknown') {
+      // Conversational flow: if user types a fresh /command, drop any
+      // command-pending state so an abandoned prompt can't catch unrelated
+      // text later. The just-invoked command will set its own pending if
+      // needed, after this clear runs.
+      const text = ctx.message?.text || '';
+      if (text.startsWith('/')) {
+        await clearCommandPending(fromId).catch(() => {});
+      }
       await next();
       return;
     }

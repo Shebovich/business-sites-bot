@@ -54,6 +54,9 @@ const K = {
   // Pending access requests, hash with username + first_name + requested_at.
   // TTL'd so abandoned requests don't pile up.
   pendingAccess:    (chatId) => `assistants:pending:${chatId}`,
+  // Conversational flow: command awaiting free-form input on next message.
+  // TTL'd short — abandoned prompts shouldn't capture unrelated text later.
+  cmdPending:       (chatId) => `cmd-pending:${chatId}`,
 };
 
 // ---- Role override (debug) -----------------------------------------------
@@ -135,6 +138,32 @@ export async function getPendingAccess(chatId) {
 
 export async function clearPendingAccess(chatId) {
   await getRedis().del(K.pendingAccess(chatId));
+}
+
+// ---- Command-pending (conversational input flow) ------------------------
+
+// Short TTL — if the user abandons a prompt and types something else, we
+// don't want a stale pending to hijack their next note 20 min later.
+const CMD_PENDING_TTL = 5 * 60;
+
+export async function setCommandPending(chatId, command, extras = {}) {
+  const value = JSON.stringify({
+    command,
+    extras,
+    set_at: new Date().toISOString(),
+  });
+  await getRedis().set(K.cmdPending(chatId), value, { ex: CMD_PENDING_TTL });
+}
+
+export async function getCommandPending(chatId) {
+  const raw = await getRedis().get(K.cmdPending(chatId));
+  if (!raw) return null;
+  try { return typeof raw === 'string' ? JSON.parse(raw) : raw; }
+  catch { return null; }
+}
+
+export async function clearCommandPending(chatId) {
+  await getRedis().del(K.cmdPending(chatId));
 }
 
 // ---- Current task --------------------------------------------------------

@@ -11,7 +11,8 @@ import { getCurrentTask, setCurrentTask, setActiveSection, getActiveSection,
          addNote, getNotes, removeNoteAt, clearNotes,
          getRoleOverride, setRoleOverride, clearRoleOverride, getRoleOverrideTtl,
          isApprovedAssistant, addApprovedAssistant,
-         getPendingAccess, clearPendingAccess } from './state.mjs';
+         getPendingAccess, clearPendingAccess,
+         setCommandPending, getCommandPending, clearCommandPending } from './state.mjs';
 import { buildTaskListKeyboard, buildSectionKeyboard,
          buildOwnerPushKeyboard, buildPreviewKeyboard } from './keyboard.mjs';
 import { SECTIONS, SECTION_BY_ID, LABELS, getEnv } from '../config.mjs';
@@ -192,19 +193,34 @@ export async function handleScout(ctx) {
   }
 
   if (!arg) {
-    // No args — pull next item from queue.
-    await pullNextFromQueue(ctx);
+    // No args — prompt the user for input. Their next free-form text goes
+    // through handleText, which sees cmd-pending and routes here.
+    await setCommandPending(String(ctx.from?.id), 'scout');
+    await ctx.reply(
+      `🔍 Что разведываем? Пришли следующим сообщением:\n\n` +
+      `• 2GIS URL (https://2gis.by/...)\n` +
+      `• Google или Yandex Maps URL\n` +
+      `• Instagram URL или @handle\n` +
+      `• URL сайта заведения (если уже есть)\n` +
+      `• Просто название\n\n` +
+      `Или /cancel чтобы отменить.`
+    );
     return;
   }
 
-  // Ad-hoc input — parse + create issue.
-  const parsed = parseScoutInput(arg);
+  await processScoutInput(ctx, arg);
+}
+
+// Shared scout input handler — used by both /scout <input> (arg-mode) and
+// the conversational follow-up after /scout (no args → prompt → text).
+export async function processScoutInput(ctx, input) {
+  const parsed = parseScoutInput(input);
   if (parsed.kind === 'empty' || parsed.kind === 'unknown_url') {
     await ctx.reply(
       `Не понял input. Поддерживаю:\n` +
       `• 2GIS URL\n• Google/Yandex Maps URL\n• Instagram URL или @handle\n` +
       `• Свой сайт заведения (URL)\n• Просто название\n\n` +
-      `Пример: /scout https://2gis.by/minsk/firm/70000001234567890`
+      `Попробуй /scout ещё раз.`
     );
     return;
   }
@@ -382,9 +398,26 @@ export async function handleSold(ctx) {
     await ctx.reply('Только owner может отмечать sold.');
     return;
   }
-  const { issueNumber, rest } = parseLifecycleArg(ctx.match);
+  const raw = (ctx.match || '').trim();
+  if (!raw) {
+    await setCommandPending(String(ctx.from?.id), 'sold');
+    await ctx.reply(
+      '💰 Какой issue # продан? Пришли следующим сообщением:\n\n' +
+      'Только номер: <code>19</code>\n' +
+      'Номер + заметка: <code>19 предоплата 50%</code>\n\n' +
+      'Или /cancel чтобы отменить.',
+      { parse_mode: 'HTML' }
+    );
+    return;
+  }
+  await processSoldInput(ctx, raw);
+}
+
+export async function processSoldInput(ctx, raw) {
+  const { issueNumber, rest } = parseLifecycleArg(raw);
   if (!issueNumber) {
-    await ctx.reply('Использование: /sold <issue_number> [optional notes]');
+    await ctx.reply('Не понял номер issue. Пример: <code>19</code> или <code>19 предоплата 50%</code>',
+      { parse_mode: 'HTML' });
     return;
   }
   try {
@@ -421,9 +454,26 @@ export async function handleLost(ctx) {
     await ctx.reply('Только owner может отмечать lost.');
     return;
   }
-  const { issueNumber, rest } = parseLifecycleArg(ctx.match);
+  const raw = (ctx.match || '').trim();
+  if (!raw) {
+    await setCommandPending(String(ctx.from?.id), 'lost');
+    await ctx.reply(
+      '❌ Какой issue # не сложился? Пришли следующим сообщением:\n\n' +
+      'Только номер: <code>19</code>\n' +
+      'Номер + причина: <code>19 дорого, выбрали конкурента</code>\n\n' +
+      'Или /cancel чтобы отменить.',
+      { parse_mode: 'HTML' }
+    );
+    return;
+  }
+  await processLostInput(ctx, raw);
+}
+
+export async function processLostInput(ctx, raw) {
+  const { issueNumber, rest } = parseLifecycleArg(raw);
   if (!issueNumber) {
-    await ctx.reply('Использование: /lost <issue_number> [optional reason]');
+    await ctx.reply('Не понял номер issue. Пример: <code>19</code> или <code>19 дорого</code>',
+      { parse_mode: 'HTML' });
     return;
   }
   await markLost(ctx, issueNumber, rest || 'no reason given');
@@ -434,10 +484,24 @@ export async function handleGhosted(ctx) {
     await ctx.reply('Только owner может отмечать ghosted.');
     return;
   }
-  const arg = ctx.match?.trim();
-  const issueNumber = Number((arg || '').replace(/^#/, ''));
+  const raw = (ctx.match || '').trim();
+  if (!raw) {
+    await setCommandPending(String(ctx.from?.id), 'ghosted');
+    await ctx.reply(
+      '👻 Какой issue # ghosted? Пришли номер следующим сообщением.\n\n' +
+      'Пример: <code>19</code>\n\nИли /cancel.',
+      { parse_mode: 'HTML' }
+    );
+    return;
+  }
+  await processGhostedInput(ctx, raw);
+}
+
+export async function processGhostedInput(ctx, raw) {
+  const issueNumber = Number(raw.replace(/^#/, ''));
   if (!Number.isFinite(issueNumber)) {
-    await ctx.reply('Использование: /ghosted <issue_number>');
+    await ctx.reply('Не понял номер. Просто число, например <code>19</code>.',
+      { parse_mode: 'HTML' });
     return;
   }
   await markLost(ctx, issueNumber, 'ghosted — no response');
@@ -535,7 +599,8 @@ export async function handleSkip(ctx) {
 export async function handleCancel(ctx) {
   await clearCurrentTask(ctx.from.id);
   await clearFeedbackPending(ctx.from.id);
-  await ctx.reply('Текущая задача сброшена.');
+  await clearCommandPending(ctx.from.id);
+  await ctx.reply('Текущая задача и pending-ввод сброшены.');
 }
 
 // ---- M2.5: /done_all (owner) + /auto_photos (owner) + /submit (assistant) ----
@@ -642,24 +707,31 @@ export async function handleApprove(ctx) {
     await ctx.reply('Только owner может одобрять задачи. Ассистент — /submit.');
     return;
   }
-  // Source: callback `approve:N` (already routed via handleCallback) or
-  // command `/approve N`. When called from a command, ctx.match holds the arg.
-  const arg = ctx.match?.trim();
-  let issueNumber;
+  const arg = (ctx.match || '').trim();
   if (arg) {
-    issueNumber = Number(arg.replace(/^#/, ''));
-    if (!Number.isFinite(issueNumber)) {
-      await ctx.reply('Использование: /approve <issue_number>. Или тапни ✅ Approve в push-сообщении.');
-      return;
-    }
-  } else {
-    // No arg → use current task (less common path; usually owner taps button).
-    const task = await getCurrentTask(ctx.from.id);
-    if (!task) {
-      await ctx.reply('Использование: /approve <issue_number>. Или тапни ✅ Approve в push-сообщении.');
-      return;
-    }
-    issueNumber = task.issue_number;
+    await processApproveInput(ctx, arg);
+    return;
+  }
+  // No arg — fall back to current task if it exists; otherwise prompt.
+  const task = await getCurrentTask(ctx.from.id);
+  if (task) {
+    await runApprove(ctx, task.issue_number);
+    return;
+  }
+  await setCommandPending(String(ctx.from?.id), 'approve');
+  await ctx.reply(
+    '✅ Какой issue # одобряем? Пришли номер следующим сообщением.\n\n' +
+    'Пример: <code>19</code>\n\nИли /cancel.',
+    { parse_mode: 'HTML' }
+  );
+}
+
+export async function processApproveInput(ctx, raw) {
+  const issueNumber = Number(raw.replace(/^#/, ''));
+  if (!Number.isFinite(issueNumber)) {
+    await ctx.reply('Не понял номер. Просто число, например <code>19</code>.',
+      { parse_mode: 'HTML' });
+    return;
   }
   await runApprove(ctx, issueNumber);
 }
@@ -866,9 +938,20 @@ export async function handleNote(ctx) {
   if (!task) { await ctx.reply('Нет текущей задачи. /list для выбора.'); return; }
   const text = (ctx.match || '').trim();
   if (!text) {
-    await ctx.reply('Использование: /note &lt;твой текст&gt;\n\nПример: /note приоритет hero и menu, остальное по возможности', { parse_mode: 'HTML' });
+    await setCommandPending(String(ctx.from?.id), 'note');
+    await ctx.reply(
+      '📝 Напиши текст заметки следующим сообщением.\n\n' +
+      'Пример: «приоритет hero и menu, остальное по возможности».\n\n' +
+      'Или /cancel чтобы отменить.'
+    );
     return;
   }
+  await processNoteInput(ctx, text);
+}
+
+export async function processNoteInput(ctx, text) {
+  const task = await getCurrentTask(ctx.from.id);
+  if (!task) { await ctx.reply('Нет текущей задачи. /list для выбора.'); return; }
   const sectionId = await getActiveSection(ctx.from.id);
   await addNote(task.issue_number, sectionId || null, text);
   const where = sectionId ? `к секции ${sectionId}` : 'к задаче (общая)';
@@ -1444,6 +1527,23 @@ export async function handleVideo(ctx) {
 export async function handleText(ctx) {
   const text = (ctx.message?.text || '').trim();
   if (!text) return;
+
+  // Conversational flow: if a previous /command set a pending input
+  // request, route this text as input for that command. Cleared after
+  // dispatch so the next text falls through to normal routing.
+  const pending = await getCommandPending(ctx.from.id).catch(() => null);
+  if (pending) {
+    await clearCommandPending(ctx.from.id);
+    switch (pending.command) {
+      case 'scout':    await processScoutInput(ctx, text);   return;
+      case 'note':     await processNoteInput(ctx, text);    return;
+      case 'sold':     await processSoldInput(ctx, text);    return;
+      case 'lost':     await processLostInput(ctx, text);    return;
+      case 'ghosted':  await processGhostedInput(ctx, text); return;
+      case 'approve':  await processApproveInput(ctx, text); return;
+      default: break; // unknown pending → fall through
+    }
+  }
 
   // M3a — Q20: owner is responding to a [💬 Замечания] prompt. Takes
   // precedence over normal routing.
