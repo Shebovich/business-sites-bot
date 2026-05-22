@@ -2,9 +2,20 @@
 // (e.g. raw file URL retrieval for IG-style URL downloading).
 // Most handler code should use ctx.* from grammy instead.
 
+// BOM-tolerant token read. `vercel env add` via `echo "..." |` introduces
+// trailing newline (and PowerShell adds U+FEFF), both poison the URL path
+// silently — TG returns HTTP 404 with description "Not Found" because the
+// trailing whitespace is encoded into the URL. grammy's bot.api handles
+// this internally, so ctx.reply() worked while our raw fetch returned 404
+// for the same token. Strip both here.
+function cleanToken() {
+  const raw = process.env.TG_BOT_TOKEN;
+  if (!raw) throw new Error('TG_BOT_TOKEN not set');
+  return raw.replace(/^﻿/, '').trim();
+}
+
 export async function tgApi(method, payload = {}) {
-  const token = process.env.TG_BOT_TOKEN;
-  if (!token) throw new Error('TG_BOT_TOKEN not set');
+  const token = cleanToken();
   const url = `https://api.telegram.org/bot${token}/${method}`;
   const res = await fetch(url, {
     method: 'POST',
@@ -21,7 +32,7 @@ export async function tgApi(method, payload = {}) {
 }
 
 export async function getFileUrl(fileId) {
-  const token = process.env.TG_BOT_TOKEN;
+  const token = cleanToken();
   const file = await tgApi('getFile', { file_id: fileId });
   return `https://api.telegram.org/file/bot${token}/${file.file_path}`;
 }
