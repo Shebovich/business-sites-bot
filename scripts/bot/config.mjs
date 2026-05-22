@@ -68,6 +68,7 @@ export const TEXT_EDIT_VERBS = [
   /^добав(?:ь|ьте)\b/i,
   /^удали(?:те)?\b/i,
   /^перепиши(?:те)?\b/i,
+  /^поменя(?:й|йте)\b/i,
 ];
 
 // Editable text fields exposed under the [📝 Тексты] keyboard.
