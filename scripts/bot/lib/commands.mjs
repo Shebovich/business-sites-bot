@@ -23,7 +23,7 @@ import { getCurrentTask, setCurrentTask, setActiveSection, getActiveSection,
 import { buildTaskListKeyboard, buildSectionKeyboard,
          buildOwnerPushKeyboard, buildPreviewKeyboard } from './keyboard.mjs';
 import { LABELS, GITHUB_REPO, getEnv } from '../config.mjs';
-import { getSections, getSectionById } from './sections.mjs';
+import { getSections, getSectionById, getSectionsForSlug, getSectionByIdForSlug } from './sections.mjs';
 import { persistUrlInput, persistTgUpload } from './photo-handler.mjs';
 import { splitUrlAndCaption, parseTextEdit } from './text-parser.mjs';
 import { collectSubmitState, hashSubmitState, buildOwnerPush,
@@ -1320,7 +1320,7 @@ export async function handleCurrent(ctx) {
     await ctx.reply('Нет текущей задачи. Открой /list и выбери одну.');
     return;
   }
-  const kb = await buildSectionKeyboard(task.issue_number);
+  const kb = await buildSectionKeyboard(task.issue_number, task.slug);
   const lines = [
     `📋 #${task.issue_number} ${task.venue_name || task.slug}`,
     `🔗 Посмотреть результат: ${task.preview_url || '(будет после первого деплоя)'}`,
@@ -1980,7 +1980,11 @@ export async function handleCallback(ctx) {
 
   if (data.startsWith('sec:')) {
     const sectionId = data.slice(4);
-    const s = getSectionById(sectionId);
+    // Per-slug section lookup falls back to default vertical если slug нет.
+    const currentTask = await getCurrentTask(ctx.from.id);
+    const s = currentTask?.slug
+      ? await getSectionByIdForSlug(currentTask.slug, sectionId)
+      : getSectionById(sectionId);
     if (!s) return;
     await setActiveSection(ctx.from.id, sectionId);
     await ctx.reply(
@@ -2046,7 +2050,7 @@ export async function handleCallback(ctx) {
     });
     // Reset active section — user must pick a section button next.
     await setActiveSection(ctx.from.id, '');
-    const kb = await buildSectionKeyboard(task.issue_number);
+    const kb = await buildSectionKeyboard(task.issue_number, task.slug);
     const lines = [
       `📋 ${task.venue_name} · #${task.issue_number}`,
       `🔗 Посмотреть результат: ${task.preview_url}`,

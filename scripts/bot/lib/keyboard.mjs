@@ -3,15 +3,19 @@
 
 import { InlineKeyboard } from 'grammy';
 import { countPhotos, getSkipped } from './state.mjs';
-import { getSections } from './sections.mjs';
+import { getSections, getSectionsForSlug } from './sections.mjs';
 
 // Build the main section keyboard for a task.
 // progress per section: "✅ 5/4", "3/4", "(нужно 1)", "⏭ skipped".
-export async function buildSectionKeyboard(issueNumber) {
+// Phase 6: prefers per-slug sections (from `_data/{slug}/visual_review_sections.json`)
+// что builder writes per actual built HTML; falls back to default vertical
+// sections если файл отсутствует.
+export async function buildSectionKeyboard(issueNumber, slug = null) {
   const kb = new InlineKeyboard();
   const skipped = new Set(await getSkipped(issueNumber));
+  const sections = slug ? await getSectionsForSlug(slug) : getSections();
 
-  for (const section of getSections()) {
+  for (const section of sections) {
     const count = await countPhotos(issueNumber, section.id);
     const label = renderSectionButton(section, count, skipped.has(section.id));
     kb.text(label, `sec:${section.id}`).row();

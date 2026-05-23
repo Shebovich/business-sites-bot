@@ -107,3 +107,80 @@ export async function ensureSections(vertical = DEFAULT_VERTICAL) {
   if (MEM.has(vertical)) return MEM.get(vertical);
   return warmSections(vertical);
 }
+
+// ---- Per-slug sections (Phase 6 — builder writes per-slug overrides) ----
+//
+// Each slug может иметь свой actual section list — depends on tier+modifier.
+// Builder Mode skeleton writes `_data/{slug}/visual_review_sections.json` с
+// массивом sections that actually exist в built HTML.
+//
+// При tap на task в /list → bot fetches per-slug sections. Если файл exists →
+// use them в section keyboard. Иначе fallback на default restaurant sections
+// (что было до этой фичи).
+
+const SLUG_MEM = new Map();
+const SLUG_REDIS_TTL = 60 * 60;  // 1h
+const SLUG_REDIS_KEY = (slug) => `sections:slug:${slug}`;
+
+async function fetchSlugSectionsFromGitHub(slug) {
+  const path = `_data/${slug}/visual_review_sections.json`;
+  const url = `https://raw.githubusercontent.com/${GITHUB_REPO}/main/${path}`;
+  const res = await fetch(url);
+  if (res.status === 404) return null;  // нет файла — fallback на default
+  if (!res.ok) throw new Error(`GitHub raw ${url}: ${res.status}`);
+  const data = await res.json();
+  if (!Array.isArray(data) || !data.length) return null;
+  return normalize(data);
+}
+
+async function fetchSlugSectionsFromUpstash(slug) {
+  try {
+    const raw = await getRedis().get(SLUG_REDIS_KEY(slug));
+    if (!raw) return null;
+    const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    if (!Array.isArray(parsed) || !parsed.length) return null;
+    return parsed;
+  } catch (e) {
+    console.warn('[sections-slug] Upstash read failed:', e.message);
+    return null;
+  }
+}
+
+async function saveSlugSectionsToUpstash(slug, sections) {
+  try {
+    await getRedis().set(SLUG_REDIS_KEY(slug), JSON.stringify(sections), { ex: SLUG_REDIS_TTL });
+  } catch (e) {
+    console.warn('[sections-slug] Upstash write failed:', e.message);
+  }
+}
+
+// Returns per-slug sections OR default vertical sections OR null.
+export async function getSectionsForSlug(slug, vertical = DEFAULT_VERTICAL) {
+  if (!slug) return getSections(vertical);
+  if (SLUG_MEM.has(slug)) return SLUG_MEM.get(slug);
+  try {
+    let sections = await fetchSlugSectionsFromUpstash(slug);
+    if (!sections) {
+      sections = await fetchSlugSectionsFromGitHub(slug);
+      if (sections) await saveSlugSectionsToUpstash(slug, sections);
+    }
+    if (!sections) {
+      // No per-slug file — fall back на default vertical.
+      SLUG_MEM.set(slug, null);
+      return getSections(vertical);
+    }
+    SLUG_MEM.set(slug, sections);
+    return sections;
+  } catch (e) {
+    console.warn(`[sections-slug] failed for ${slug}, using default:`, e.message);
+    return getSections(vertical);
+  }
+}
+
+export function getSectionByIdForSlug(slug, id, vertical = DEFAULT_VERTICAL) {
+  const cached = SLUG_MEM.get(slug);
+  if (cached) {
+    return cached.find(s => s.id === id) || null;
+  }
+  return getSectionById(id, vertical);
+}
