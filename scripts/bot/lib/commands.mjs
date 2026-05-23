@@ -398,27 +398,55 @@ async function replyScoutQueue(ctx) {
   }
 }
 
-// M3b — Q27: scout review inbox.
+// Scout review inbox. Показывает ОБА состояния:
+//   📝 awaiting-scout — raw заявка от ассистента, ещё не resolved Claude Code
+//   ✅ scouted        — Claude Code skill уже разведал, чек-лист готов
+// Owner может approve/reject любую напрямую из бота.
+// Approve переводит → `approved` (researcher агент подхватит из /process-tg-tasks).
 export async function handleScoutReview(ctx) {
   if (ctx.role !== 'owner') {
     await ctx.reply('Только owner может approve лиды. Ассистент — /scout {input} чтобы предложить.');
     return;
   }
-  const tasks = await safeGetActiveTasks(LABELS.SCOUTED);
-  if (tasks.length === 0) {
-    await ctx.reply('Нет лидов на approve. Когда scout-агент поставит `scouted`, появятся здесь.');
+  const [awaiting, scouted] = await Promise.all([
+    safeGetActiveTasks(LABELS.AWAITING_SCOUT),
+    safeGetActiveTasks(LABELS.SCOUTED),
+  ]);
+  // De-dup на случай если issue несёт оба лейбла одновременно.
+  const seen = new Set();
+  const tagged = [];
+  for (const t of awaiting) {
+    if (seen.has(t.issue_number)) continue;
+    seen.add(t.issue_number);
+    tagged.push({ ...t, _status: 'awaiting' });
+  }
+  for (const t of scouted) {
+    if (seen.has(t.issue_number)) continue;
+    seen.add(t.issue_number);
+    tagged.push({ ...t, _status: 'scouted' });
+  }
+  if (tagged.length === 0) {
+    await ctx.reply('Нет лидов на review.\n\n• `awaiting-scout` — ассистент предложил, ждёт resolve\n• `scouted` — Claude Code разведал, ждёт approve',
+      { parse_mode: 'Markdown' });
     return;
   }
-  await ctx.reply(`🔍 Лидов на approve: ${tasks.length}`);
-  for (const t of tasks) {
-    const name = t.venue_name || t.slug || `issue-${t.issue_number}`;
+  await ctx.reply(`🔍 Лидов на review: ${tagged.length}`);
+  for (const t of tagged) {
+    const name = t.venue_name || t.slug || t.title || `issue-${t.issue_number}`;
+    const statusIcon = t._status === 'awaiting' ? '📝 raw' : '✅ resolved';
+    const hint = t._status === 'awaiting'
+      ? '\n_Не разведан — approve = доверить researcher\'у, reject = отказ + push ассистенту._'
+      : '';
     const kb = new InlineKeyboard()
-      .text('✅ Approve и начать', `scout_review:${t.issue_number}:approve`)
+      .text('✅ Approve', `scout_review:${t.issue_number}:approve`)
       .text('❌ Reject', `scout_review:${t.issue_number}:reject`)
       .row()
       .text('⏭ Skip', `scout_review:${t.issue_number}:skip`)
-      .text('👁 Открыть issue', `scout_review:${t.issue_number}:open`);
-    await ctx.reply(`${name} · #${t.issue_number}\n${t.html_url}`, { reply_markup: kb });
+      .text('👁 Open', `scout_review:${t.issue_number}:open`);
+    await ctx.reply(
+      `[${statusIcon}] ${name} · #${t.issue_number}\n${t.html_url}${hint}`,
+      { reply_markup: kb, parse_mode: 'Markdown' }
+    );
   }
 }
 
@@ -444,8 +472,19 @@ export async function processScoutRejectInput(ctx, reason, issueNumber) {
   } catch (e) {
     console.warn('[scout_reject] commentOnIssue failed:', e.message);
   }
+  // Determine current scout label to remove — issue may be in awaiting-scout
+  // (raw, не разведан) или scouted (Claude Code разведал). Reject работает в обоих.
+  let currentLabel = null;
   try {
-    await setLabel(issueNumber, LABELS.WONT_DO, LABELS.SCOUTED);
+    const issue = await getIssue(issueNumber);
+    const labels = (issue.labels || []).map(l => l.name);
+    if (labels.includes(LABELS.SCOUTED)) currentLabel = LABELS.SCOUTED;
+    else if (labels.includes(LABELS.AWAITING_SCOUT)) currentLabel = LABELS.AWAITING_SCOUT;
+  } catch (e) {
+    console.warn('[scout_reject] getIssue failed:', e.message);
+  }
+  try {
+    await setLabel(issueNumber, LABELS.WONT_DO, currentLabel);
   } catch (e) {
     console.warn('[scout_reject] setLabel failed:', e.message);
   }
@@ -1788,17 +1827,33 @@ export async function handleCallback(ctx) {
     return;
   }
 
-  // M3b — Q27: scout_review actions. `scout_review:N:approve|skip|open`.
+  // Scout review actions. `scout_review:N:approve|reject|skip|open`. Works
+  // on issues с label `awaiting-scout` ИЛИ `scouted` — approve переводит
+  // → `approved`, researcher агент подхватит при /process-tg-tasks.
   if (data.startsWith('scout_review:')) {
     if (ctx.role !== 'owner') return;
     const [, nStr, action] = data.split(':');
     const issueNumber = Number(nStr);
     if (!Number.isFinite(issueNumber)) return;
     if (action === 'approve') {
+      // Determine current scout label to remove (awaiting-scout или scouted).
+      let currentLabel = null;
       try {
-        await setLabel(issueNumber, LABELS.NEEDS_VISUAL_REVIEW, LABELS.SCOUTED);
+        const issue = await getIssue(issueNumber);
+        const labels = (issue.labels || []).map(l => l.name);
+        if (labels.includes(LABELS.SCOUTED)) currentLabel = LABELS.SCOUTED;
+        else if (labels.includes(LABELS.AWAITING_SCOUT)) currentLabel = LABELS.AWAITING_SCOUT;
+      } catch (e) {
+        console.warn('[scout_review approve] getIssue failed:', e.message);
+      }
+      try {
+        await setLabel(issueNumber, LABELS.APPROVED, currentLabel);
+        const fromHint = currentLabel === LABELS.AWAITING_SCOUT
+          ? ' (raw → researcher разберётся в /process-tg-tasks)'
+          : '';
         await ctx.reply(
-          `✅ #${issueNumber} approved → \`needs-visual-review\`. Появится в /list.`,
+          `✅ #${issueNumber} → \`approved\`${fromHint}.\n\n` +
+          `Запусти на Mac \`/process-tg-tasks\` — researcher подхватит и пойдёт по Flow X.`,
           { parse_mode: 'Markdown' }
         );
       } catch (e) {

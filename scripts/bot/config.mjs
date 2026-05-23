@@ -31,6 +31,9 @@ export const LABELS = {
   // Phase 3.4 — design-director выводит 2 варианта, owner picks A/B в TG.
   DESIGN_PENDING:  'design-pending',
   DESIGN_APPROVED: 'design-approved',
+  // v5 Flow X — owner approve scouted → researcher запускается с этим лейблом.
+  // Заменяет legacy NEEDS_VISUAL_REVIEW в approve handler.
+  APPROVED: 'approved',
 };
 
 // Sections a user can submit photos for. Each entry: id, label (RU display),
