@@ -933,14 +933,21 @@ export async function handleReassign(ctx) {
 }
 
 export async function handleList(ctx) {
-  const needsReview = await safeGetActiveTasks(LABELS.NEEDS_VISUAL_REVIEW);
-  // Only owner sees the `awaiting-owner-review` queue inline with /list;
-  // assistants don't need to act on submissions waiting for owner.
+  // Show pipeline-active issues at all stages owner/assistant might tap on:
+  //   📋 needs-visual-review — visual loop (assistant adds photos via TG)
+  //   🔵 awaiting-owner-review — assistant /submit'нул, ждёт owner (owner-only)
+  //   🧱 built — builder skeleton задеплоил, ждёт owner [Готово] or [Ещё правки]
+  //   🎉 ready-for-pitch — готов к /pitch_review
+  const [needsReview, built, readyForPitch] = await Promise.all([
+    safeGetActiveTasks(LABELS.NEEDS_VISUAL_REVIEW),
+    safeGetActiveTasks(LABELS.BUILT),
+    safeGetActiveTasks(LABELS.READY_FOR_PITCH),
+  ]);
   const awaitingOwner = ctx.role === 'owner'
     ? await safeGetActiveTasks(LABELS.AWAITING_OWNER_REVIEW)
     : [];
 
-  // De-dup: an issue could theoretically carry both labels mid-transition.
+  // De-dup: an issue could theoretically carry multiple labels mid-transition.
   const seen = new Set();
   const tagged = [];
   for (const t of needsReview) {
@@ -953,13 +960,30 @@ export async function handleList(ctx) {
     seen.add(t.issue_number);
     tagged.push({ ...t, _icon: '🔵' });
   }
+  for (const t of built) {
+    if (seen.has(t.issue_number)) continue;
+    seen.add(t.issue_number);
+    tagged.push({ ...t, _icon: '🧱' });
+  }
+  for (const t of readyForPitch) {
+    if (seen.has(t.issue_number)) continue;
+    seen.add(t.issue_number);
+    tagged.push({ ...t, _icon: '🎉' });
+  }
 
   if (tagged.length === 0) {
-    await ctx.reply('Нет активных задач. Жду лейбла `needs-visual-review`.');
+    await ctx.reply('Нет активных задач.\n\n📋 visual-review · 🧱 built (ждёт approve) · 🎉 ready-for-pitch');
     return;
   }
   const kb = buildTaskListKeyboard(tagged);
-  await ctx.reply(`Активных задач: ${tagged.length}`, { reply_markup: kb });
+  const summary = [
+    `Активных задач: ${tagged.length}`,
+    `   📋 visual-review: ${needsReview.length}`,
+    awaitingOwner.length ? `   🔵 awaiting-owner: ${awaitingOwner.length}` : null,
+    built.length ? `   🧱 built (ждут approve): ${built.length}` : null,
+    readyForPitch.length ? `   🎉 ready-for-pitch: ${readyForPitch.length}` : null,
+  ].filter(Boolean).join('\n');
+  await ctx.reply(summary, { reply_markup: kb });
 }
 
 // M3c — Q30: batch pitch review. Lists ready-for-pitch issues with per-issue
