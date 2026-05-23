@@ -10,8 +10,36 @@
 // последней встроенной картинке секций.
 
 import yaml from 'js-yaml';
-import { SECTIONS as STATIC_SECTIONS, GITHUB_REPO } from '../config.mjs';
+import { SECTIONS as STATIC_SECTIONS, GITHUB_REPO, getEnv } from '../config.mjs';
 import { getRedis } from './state.mjs';
+
+// Private repos require auth — raw.githubusercontent.com anonymous returns 404.
+// Use api.github.com/contents (returns base64) with GH_TOKEN. Falls back to
+// raw anonymous if no token (works for public repos).
+async function fetchRepoFile(path) {
+  const token = getEnv('GH_TOKEN') || getEnv('GITHUB_TOKEN');
+  if (token) {
+    const url = `https://api.github.com/repos/${GITHUB_REPO}/contents/${encodeURIComponent(path)}?ref=main`;
+    const res = await fetch(url, {
+      headers: {
+        'authorization': `Bearer ${token}`,
+        'accept': 'application/vnd.github+json',
+        'x-github-api-version': '2022-11-28',
+      },
+    });
+    if (res.status === 404) return null;
+    if (!res.ok) throw new Error(`api.github.com ${path}: ${res.status}`);
+    const j = await res.json();
+    if (!j.content) return null;
+    return Buffer.from(j.content, 'base64').toString('utf8');
+  }
+  // Fallback: anonymous raw (works only для public repos)
+  const url = `https://raw.githubusercontent.com/${GITHUB_REPO}/main/${path}`;
+  const res = await fetch(url);
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`raw ${url}: ${res.status}`);
+  return await res.text();
+}
 
 const CACHE_TTL_SECONDS = 60 * 60;        // 1h в Upstash
 const DEFAULT_VERTICAL = 'restaurant';
@@ -39,10 +67,8 @@ function normalize(rawList) {
 
 async function fetchFromGitHub(vertical) {
   const path = `_verticals/${vertical}.yaml`;
-  const url = `https://raw.githubusercontent.com/${GITHUB_REPO}/main/${path}`;
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`GitHub raw ${url}: ${res.status}`);
-  const text = await res.text();
+  const text = await fetchRepoFile(path);
+  if (!text) throw new Error(`File not found: ${path}`);
   const doc = yaml.load(text);
   const list = doc?.visual_review_sections;
   if (!Array.isArray(list) || !list.length) {
@@ -124,11 +150,14 @@ const SLUG_REDIS_KEY = (slug) => `sections:slug:${slug}`;
 
 async function fetchSlugSectionsFromGitHub(slug) {
   const path = `_data/${slug}/visual_review_sections.json`;
-  const url = `https://raw.githubusercontent.com/${GITHUB_REPO}/main/${path}`;
-  const res = await fetch(url);
-  if (res.status === 404) return null;  // нет файла — fallback на default
-  if (!res.ok) throw new Error(`GitHub raw ${url}: ${res.status}`);
-  const data = await res.json();
+  const text = await fetchRepoFile(path);
+  if (!text) return null;  // нет файла — fallback на default
+  let data;
+  try { data = JSON.parse(text); }
+  catch (e) {
+    console.warn(`[sections-slug] bad JSON in ${path}: ${e.message}`);
+    return null;
+  }
   if (!Array.isArray(data) || !data.length) return null;
   return normalize(data);
 }

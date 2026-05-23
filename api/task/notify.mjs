@@ -100,7 +100,8 @@ function buildText({ issue, stage, preview_url, reason, progress }) {
     case 'done':
       return (
         `✅ <b>#${issue}</b> готов!` +
-        (preview_url ? `\n\nPreview: ${esc(preview_url)}` : '')
+        (reason ? `\n\n${esc(reason)}` : '') +
+        (preview_url ? `\n\n🔗 ${esc(preview_url)}` : '')
       );
     case 'needs_fix':
       return (
