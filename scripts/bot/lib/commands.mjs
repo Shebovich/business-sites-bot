@@ -19,6 +19,8 @@ import { getCurrentTask, setCurrentTask, setActiveSection, getActiveSection,
          touchTask, setPitchInfo, getPitchInfo,
          getBugSession, startBugSession, appendBugText, appendBugMedia,
          clearBugSession,
+         getPromptSession, startPromptSession, appendPromptText, appendPromptMedia,
+         clearPromptSession,
          getClaudeQuestion, setClaudeAnswer, getClaudeAnswer } from './state.mjs';
 import { buildTaskListKeyboard, buildSectionKeyboard,
          buildOwnerPushKeyboard, buildPreviewKeyboard } from './keyboard.mjs';
@@ -213,13 +215,21 @@ export async function handleBug(ctx) {
   );
 }
 
+// Unified /done — finalises whichever session is active (bug OR prompt).
+// If both exist, bug wins (was started earlier per typical UX).
 export async function handleDone(ctx) {
   const chatId = String(ctx.from?.id);
-  const session = await getBugSession(chatId);
-  if (!session) {
-    await ctx.reply('Нет начатого bug-репорта. /bug чтобы начать.');
+  const bugSess = await getBugSession(chatId);
+  const promptSess = bugSess ? null : await getPromptSession(chatId);
+  if (!bugSess && !promptSess) {
+    await ctx.reply('Нет начатого bug-репорта или prompt. /bug или /prompt чтобы начать.');
     return;
   }
+  if (bugSess) return finalizeBugSession(ctx, chatId, bugSess);
+  return finalizePromptSession(ctx, chatId, promptSess);
+}
+
+async function finalizeBugSession(ctx, chatId, session) {
   if (!session.description && (!session.media || session.media.length === 0)) {
     await ctx.reply('Сессия пустая — нечего отправлять. Опиши проблему или приложи медиа, потом /done.');
     return;
@@ -230,7 +240,8 @@ export async function handleDone(ctx) {
   const title = `[bug] ${truncatePreview(session.description || '(no description, media-only)', 60)}`;
 
   const mediaLines = (session.media || []).map((m, i) =>
-    `- ${i + 1}. ${m.type === 'video' ? '🎥 video' : '📷 photo'} · file_id: \`${m.file_id}\`` +
+    `- ${i + 1}. ${formatMediaIcon(m)} · file_id: \`${m.file_id}\`` +
+    (m.file_name ? ` · name: "${m.file_name}"` : '') +
     (m.caption ? ` · caption: "${truncatePreview(m.caption, 60)}"` : '')
   );
 
@@ -257,7 +268,6 @@ export async function handleDone(ctx) {
     await ctx.reply(`❌ Не смог создать bug issue: ${e.message}`);
     return;
   }
-  // Bind reporter to issue for future DM (reject/confirm push back).
   try { await setAssistantChatId(created.number, chatId); }
   catch (e) { console.warn('[bug] setAssistantChatId failed:', e.message); }
 
@@ -271,7 +281,6 @@ export async function handleDone(ctx) {
     return;
   }
 
-  // Assistant flow — push owner for review.
   await ctx.reply(
     `✅ Bug #${created.number} отправлен owner'у на review.\n${created.html_url}\n\n` +
     `Получишь push когда решит — confirm or reject.`
@@ -289,6 +298,84 @@ export async function handleDone(ctx) {
       console.warn('[bug] owner push failed:', e.message);
     }
   }
+}
+
+async function finalizePromptSession(ctx, chatId, session) {
+  if (!session.description && (!session.media || session.media.length === 0)) {
+    await ctx.reply('Сессия пустая — нечего отправлять. Опиши задачу или приложи медиа, потом /done.');
+    return;
+  }
+  const reporter = ctx.from?.username ? `@${ctx.from.username}` : `id:${ctx.from?.id}`;
+  const isOwner = ctx.role === 'owner';
+  const label = isOwner ? LABELS.PROMPT : LABELS.PROMPT_PENDING;
+  const title = `[prompt] ${truncatePreview(session.description || '(no description, media-only)', 60)}`;
+
+  const mediaLines = (session.media || []).map((m, i) =>
+    `- ${i + 1}. ${formatMediaIcon(m)} · file_id: \`${m.file_id}\`` +
+    (m.file_name ? ` · name: "${m.file_name}"` : '') +
+    (m.mime_type ? ` · mime: ${m.mime_type}` : '') +
+    (m.caption ? ` · caption: "${truncatePreview(m.caption, 60)}"` : '')
+  );
+
+  const body = [
+    `Sent by ${reporter} (${ctx.role}) via TG bot.`,
+    '',
+    '## Description',
+    session.description || '(no text — media-only)',
+    '',
+    mediaLines.length ? `## Media (${mediaLines.length})` : '',
+    ...mediaLines,
+    '',
+    `<!-- bot-prompt-v1 -->`,
+    `reporter_chat_id: ${chatId}`,
+    `started_at: ${session.started_at}`,
+    `submitted_at: ${new Date().toISOString()}`,
+    `<!-- /bot-prompt-v1 -->`,
+  ].filter(Boolean).join('\n');
+
+  let created;
+  try {
+    created = await createIssue({ title, body, labels: [label] });
+  } catch (e) {
+    await ctx.reply(`❌ Не смог создать prompt issue: ${e.message}`);
+    return;
+  }
+  try { await setAssistantChatId(created.number, chatId); }
+  catch (e) { console.warn('[prompt] setAssistantChatId failed:', e.message); }
+
+  await clearPromptSession(chatId);
+
+  if (isOwner) {
+    await ctx.reply(
+      `✅ Prompt #${created.number} → label \`prompt\` (owner direct). Monitor подхватит + Claude Code execute.\n${created.html_url}`,
+      { parse_mode: 'Markdown' }
+    );
+    return;
+  }
+
+  await ctx.reply(
+    `✅ Prompt #${created.number} отправлен owner'у на review.\n${created.html_url}\n\n` +
+    `Получишь push когда approved или rejected.`
+  );
+  const ownerId = getEnv('TG_OWNER_CHAT_ID');
+  if (ownerId && String(ownerId) !== chatId) {
+    try {
+      await sendMessage(ownerId,
+        `💡 Новый prompt #${created.number} от ${reporter}.\n\n` +
+        `${truncatePreview(session.description || '(no text — media-only)', 200)}\n\n` +
+        `Media: ${session.media?.length || 0} шт.\n\n` +
+        `/prompt_review чтобы посмотреть + approve/reject.`
+      );
+    } catch (e) {
+      console.warn('[prompt] owner push failed:', e.message);
+    }
+  }
+}
+
+function formatMediaIcon(m) {
+  if (m.type === 'video') return '🎥 video';
+  if (m.type === 'document') return `📎 document${m.file_name ? ` (${m.file_name})` : ''}`;
+  return '📷 photo';
 }
 
 export async function handleBugReview(ctx) {
@@ -375,6 +462,129 @@ export async function processBugRejectInput(ctx, reason, issueNumber) {
 
   await ctx.reply(
     `#${issueNumber} → wont-fix + closed.\n` +
+    (commentOk ? '📝 Комментарий добавлен.' : '⚠️ Комментарий не записан.') + '\n' + pushLine
+  );
+}
+
+// ---- /prompt — assistant идея/задача для Claude Code ------------------
+//
+// Симметрично /bug, но semantics другая:
+//   /bug — «есть проблема» → owner fix
+//   /prompt — «есть идея/задача» → owner approve → Claude Code execute
+//
+// Flow (same as /bug):
+//   /prompt [text]    — open session (text + media + documents, 30min TTL)
+//   /done             — submit. Assistant → label prompt-pending + push owner.
+//                       Owner → label prompt directly (Monitor execute).
+//   /prompt_review    — owner inbox (pending + active prompts)
+//   tap card          — detail view с media gallery + [✅ Approve] [❌ Reject]
+//   approve → label `prompt` — Monitor reactively подхватывает + я execute
+//   reject  → label `prompt-rejected` + close + push reporter
+
+export async function handlePrompt(ctx) {
+  if (ctx.role === 'unknown') return;
+  const chatId = String(ctx.from?.id);
+  const arg = (ctx.match || '').trim();
+
+  const existing = await getPromptSession(chatId);
+  if (existing) {
+    await ctx.reply(
+      `⚠️ У тебя уже начат prompt. Сброшу старую сессию (медиа: ${existing.media?.length || 0}).\n\n` +
+      `Опиши новую задачу/идею. Можешь приложить фото/видео/файл. /done — отправить, /cancel — отменить.`
+    );
+  }
+  await startPromptSession(chatId, arg);
+  await ctx.reply(
+    arg
+      ? `💡 Prompt начат с текстом: "${truncatePreview(arg, 80)}".\n\n` +
+        `Прикрепи фото/видео/файлы (опционально). Шли ещё текст чтобы дополнить. **Caption у медиа тоже идёт в описание**.\n\n` +
+        `/done — отправить. /cancel — отменить.`
+      : `💡 Опиши задачу/идею для Claude Code — текстом, фото, видео, файлом, либо комбинацией.\n\nПриму всё что пришлёшь (до 10 медиа).\n\nКогда готов — /done. Отменить — /cancel.`
+  );
+}
+
+export async function handlePromptReview(ctx) {
+  if (ctx.role !== 'owner') {
+    await ctx.reply('Только owner может review prompts.');
+    return;
+  }
+  const pending = await safeGetActiveTasks(LABELS.PROMPT_PENDING);
+  const active = await safeGetActiveTasks(LABELS.PROMPT);
+  if (pending.length === 0 && active.length === 0) {
+    await ctx.reply('Нет prompts. Когда ассистент пришлёт /prompt → /done — увидишь здесь.');
+    return;
+  }
+  const kb = new InlineKeyboard();
+  for (const t of pending) {
+    kb.text(`💡 pending · #${t.issue_number} · ${truncatePreview(t.venue_name || t.title || '', 50)}`,
+      `prompt_view:${t.issue_number}`).row();
+  }
+  for (const t of active) {
+    kb.text(`⚡ active · #${t.issue_number} · ${truncatePreview(t.venue_name || t.title || '', 50)}`,
+      `prompt_view:${t.issue_number}`).row();
+  }
+  const summary = [
+    `💡 Prompts: ${pending.length + active.length}`,
+    `   pending review: ${pending.length}`,
+    `   approved (waiting Claude Code): ${active.length}`,
+    '',
+    'Tap карточку — увидишь описание, медиа, кнопки approve/reject.',
+  ].join('\n');
+  await ctx.reply(summary, { reply_markup: kb });
+}
+
+export async function processPromptRejectInput(ctx, reason, issueNumber) {
+  if (ctx.role !== 'owner') return;
+  if (!Number.isFinite(issueNumber)) {
+    await ctx.reply('⚠️ Не нашёл номер prompt — /prompt_review заново.');
+    return;
+  }
+  const cleanReason = (reason || '').trim() || 'причина не указана';
+  const ownerName = ctx.from?.username ? `@${ctx.from.username}` : (ctx.from?.first_name || 'owner');
+  const today = new Date().toISOString().slice(0, 10);
+
+  let commentOk = false;
+  try {
+    await commentOnIssue(issueNumber, `❌ **Rejected by ${ownerName} on ${today}.**\n\n${cleanReason}`);
+    commentOk = true;
+  } catch (e) { console.warn('[prompt_reject] comment failed:', e.message); }
+
+  let currentLabel = null;
+  try {
+    const issue = await getIssue(issueNumber);
+    const labels = (issue.labels || []).map(l => l.name);
+    if (labels.includes(LABELS.PROMPT_PENDING)) currentLabel = LABELS.PROMPT_PENDING;
+    else if (labels.includes(LABELS.PROMPT)) currentLabel = LABELS.PROMPT;
+  } catch (e) { console.warn('[prompt_reject] getIssue failed:', e.message); }
+
+  try { await setLabel(issueNumber, LABELS.PROMPT_REJECTED, currentLabel); }
+  catch (e) { console.warn('[prompt_reject] setLabel failed:', e.message); }
+
+  try { await closeIssue(issueNumber, { stateReason: 'not_planned' }); }
+  catch (e) { console.warn('[prompt_reject] closeIssue failed:', e.message); }
+
+  let pushStatus = 'no_chat_id';
+  try {
+    const reporterId = await getAssistantChatId(issueNumber);
+    if (reporterId && String(reporterId) !== String(ctx.from?.id)) {
+      await sendMessage(reporterId,
+        `❌ Твой prompt #${issueNumber} отклонён owner'ом.\n\nПричина: ${cleanReason}`);
+      pushStatus = 'sent';
+    } else if (reporterId) {
+      pushStatus = 'self';
+    }
+  } catch (e) {
+    console.warn('[prompt_reject] reporter push failed:', e.message);
+    pushStatus = 'failed';
+  }
+
+  const pushLine = pushStatus === 'sent' ? '📨 DM reporter\'у отправлен.'
+    : pushStatus === 'self' ? '(reporter = owner, без DM)'
+    : pushStatus === 'no_chat_id' ? '⚠️ DM не отправлен (reporter не найден).'
+    : '⚠️ DM упал — см. vercel logs.';
+
+  await ctx.reply(
+    `#${issueNumber} → prompt-rejected + closed.\n` +
     (commentOk ? '📝 Комментарий добавлен.' : '⚠️ Комментарий не записан.') + '\n' + pushLine
   );
 }
@@ -1346,11 +1556,14 @@ export async function handleSkip(ctx) {
 
 export async function handleCancel(ctx) {
   const hadBug = !!(await getBugSession(ctx.from.id).catch(() => null));
+  const hadPrompt = !!(await getPromptSession(ctx.from.id).catch(() => null));
   await clearCurrentTask(ctx.from.id);
   await clearFeedbackPending(ctx.from.id);
   await clearCommandPending(ctx.from.id);
   await clearBugSession(ctx.from.id);
-  await ctx.reply(`Сброшено${hadBug ? ' (включая bug-сессию)' : ''}.`);
+  await clearPromptSession(ctx.from.id);
+  const extras = [hadBug && 'bug', hadPrompt && 'prompt'].filter(Boolean).join(' + ');
+  await ctx.reply(`Сброшено${extras ? ` (включая ${extras}-сессию)` : ''}.`);
 }
 
 // ---- M2.5: /done_all (owner) + /auto_photos (owner) + /submit (assistant) ----
@@ -2130,6 +2343,107 @@ export async function handleCallback(ctx) {
     return;
   }
 
+  // prompt_view:N + prompt_review:N — symmetric к bug_view + bug_review.
+  if (data.startsWith('prompt_view:')) {
+    if (ctx.role !== 'owner') return;
+    const issueNumber = Number(data.slice('prompt_view:'.length));
+    if (!Number.isFinite(issueNumber)) return;
+    let issue;
+    try { issue = await getIssue(issueNumber); }
+    catch (e) { await ctx.reply(`❌ Не удалось получить #${issueNumber}: ${e.message}`); return; }
+    const labels = (issue.labels || []).map(l => l.name);
+    const isPending = labels.includes(LABELS.PROMPT_PENDING);
+    const isActive = labels.includes(LABELS.PROMPT);
+    const statusLine = isPending ? '💡 pending — ждёт approve'
+      : isActive ? '⚡ active — ждёт Claude Code execute'
+      : `⚠️ status: ${labels.join(', ') || 'нет'}`;
+    const body = (issue.body || '');
+    const reporter = body.match(/Sent by\s+(\S+)/)?.[1] || 'unknown';
+    const descMatch = body.match(/## Description\s*\n([\s\S]*?)(\n##|\n<!--|$)/);
+    const description = descMatch ? descMatch[1].trim() : '(no description)';
+    const fileIds = [...body.matchAll(/file_id:\s*`([^`]+)`/g)].map(m => m[1]);
+    const types = [...body.matchAll(/- \d+\.\s*([📷🎥📎])/g)].map(m => {
+      if (m[1] === '🎥') return 'video';
+      if (m[1] === '📎') return 'document';
+      return 'photo';
+    });
+
+    if (fileIds.length > 0) {
+      try {
+        if (fileIds.length === 1) {
+          const t = types[0];
+          if (t === 'document') await ctx.replyWithDocument(fileIds[0]);
+          else if (t === 'video') await ctx.replyWithVideo(fileIds[0]);
+          else await ctx.replyWithPhoto(fileIds[0]);
+        } else {
+          // sendMediaGroup doesn't support documents — split.
+          const groupable = fileIds.map((fid, i) => ({ type: types[i] || 'photo', media: fid }))
+            .filter(m => m.type === 'photo' || m.type === 'video');
+          const docs = fileIds.map((fid, i) => ({ type: types[i] || 'photo', media: fid }))
+            .filter(m => m.type === 'document');
+          if (groupable.length >= 2) await ctx.replyWithMediaGroup(groupable);
+          else if (groupable.length === 1) {
+            const m = groupable[0];
+            if (m.type === 'video') await ctx.replyWithVideo(m.media);
+            else await ctx.replyWithPhoto(m.media);
+          }
+          for (const d of docs) await ctx.replyWithDocument(d.media);
+        }
+      } catch (e) {
+        await ctx.reply(`⚠️ Не удалось загрузить media: ${e.message}`);
+      }
+    }
+
+    const lines = [
+      `💡 Prompt #${issueNumber} · ${statusLine}`,
+      `From: ${reporter}`,
+      `${issue.html_url}`,
+      '',
+      truncatePreview(description, 1200),
+    ];
+    const actionKb = new InlineKeyboard()
+      .text('✅ Approve', `prompt_review:${issueNumber}:approve`)
+      .text('❌ Reject', `prompt_review:${issueNumber}:reject`)
+      .row()
+      .text('🔙 К списку', `prompt_review:${issueNumber}:back`);
+    await ctx.reply(lines.join('\n'), { reply_markup: actionKb });
+    return;
+  }
+
+  if (data.startsWith('prompt_review:')) {
+    if (ctx.role !== 'owner') return;
+    const [, nStr, action] = data.split(':');
+    const issueNumber = Number(nStr);
+    if (!Number.isFinite(issueNumber)) return;
+    if (action === 'approve') {
+      try {
+        await setLabel(issueNumber, LABELS.PROMPT, LABELS.PROMPT_PENDING);
+        const ownerName = ctx.from?.username ? `@${ctx.from.username}` : 'owner';
+        await commentOnIssue(issueNumber, `✅ **Approved by ${ownerName}** — Monitor catches + Claude Code execute.`)
+          .catch(e => console.warn('[prompt_approve] comment failed:', e.message));
+        await ctx.reply(`✅ #${issueNumber} → \`prompt\`. Claude Code reactive Monitor подхватит и выполнит.`,
+          { parse_mode: 'Markdown' });
+        const reporterId = await getAssistantChatId(issueNumber).catch(() => null);
+        if (reporterId && String(reporterId) !== String(ctx.from?.id)) {
+          await sendMessage(reporterId,
+            `✅ Твой prompt #${issueNumber} approved owner'ом — Claude Code execute. Уведомлю когда done.`
+          ).catch(e => console.warn('[prompt_approve] push failed:', e.message));
+        }
+      } catch (e) {
+        await ctx.reply(`❌ approve failed: ${e.message}`);
+      }
+    } else if (action === 'reject') {
+      await setCommandPending(String(ctx.from?.id), 'prompt_reject', { issueNumber });
+      await ctx.reply(
+        `❌ #${issueNumber}: напиши причину reject одной строкой — отправлю reporter'у + закрою prompt-rejected.\n\n` +
+        `Отмена — /cancel.`
+      );
+    } else if (action === 'back') {
+      await handlePromptReview(ctx);
+    }
+    return;
+  }
+
   // bug_view:N — детальный view одного bug-репорта с media gallery.
   if (data.startsWith('bug_view:')) {
     if (ctx.role !== 'owner') return;
@@ -2631,21 +2945,19 @@ async function runFeedback(ctx, issueNumber, text) {
 export async function handlePhoto(ctx) {
   // /bug session priority — appending media to bug draft instead of section upload.
   const bugSession = await getBugSession(ctx.from.id).catch(() => null);
-  if (bugSession) {
+  const promptSess = bugSession ? null : await getPromptSession(ctx.from.id).catch(() => null);
+  const sess = bugSession || promptSess;
+  if (sess) {
     const sizes = ctx.message.photo;
     const largest = sizes[sizes.length - 1];
     const caption = (ctx.message.caption || '').trim();
-    const ok = await appendBugMedia(ctx.from.id, {
-      type: 'photo',
-      file_id: largest.file_id,
-      caption,
-    });
+    const appendFn = bugSession ? appendBugMedia : appendPromptMedia;
+    const ok = await appendFn(ctx.from.id, { type: 'photo', file_id: largest.file_id, caption });
     if (ok) {
-      const count = (bugSession.media?.length || 0) + 1;
-      const captionLine = caption
-        ? `\n📝 Caption принят как описание: "${truncatePreview(caption, 80)}"`
-        : '';
-      await ctx.reply(`🐛 Фото добавлено в bug-репорт (${count}/10).${captionLine}\n\n/done — отправить.`);
+      const count = (sess.media?.length || 0) + 1;
+      const icon = bugSession ? '🐛' : '💡';
+      const captionLine = caption ? `\n📝 Caption принят как описание: "${truncatePreview(caption, 80)}"` : '';
+      await ctx.reply(`${icon} Фото добавлено (${count}/10).${captionLine}\n\n/done — отправить.`);
     } else {
       await ctx.reply(`⚠️ Лимит 10 медиа. /done — отправить, /cancel — начать заново.`);
     }
@@ -2672,23 +2984,20 @@ export async function handlePhoto(ctx) {
 }
 
 export async function handleVideo(ctx) {
-  // /bug session priority.
   const bugSession = await getBugSession(ctx.from.id).catch(() => null);
-  if (bugSession) {
+  const promptSess = bugSession ? null : await getPromptSession(ctx.from.id).catch(() => null);
+  const sess = bugSession || promptSess;
+  if (sess) {
     const caption = (ctx.message.caption || '').trim();
-    const ok = await appendBugMedia(ctx.from.id, {
-      type: 'video',
-      file_id: ctx.message.video.file_id,
-      caption,
-    });
+    const appendFn = bugSession ? appendBugMedia : appendPromptMedia;
+    const ok = await appendFn(ctx.from.id, { type: 'video', file_id: ctx.message.video.file_id, caption });
     if (ok) {
-      const count = (bugSession.media?.length || 0) + 1;
-      const captionLine = caption
-        ? `\n📝 Caption принят как описание: "${truncatePreview(caption, 80)}"`
-        : '';
-      await ctx.reply(`🐛 Видео добавлено в bug-репорт (${count}/10).${captionLine}\n\n/done — отправить.`);
+      const count = (sess.media?.length || 0) + 1;
+      const icon = bugSession ? '🐛' : '💡';
+      const captionLine = caption ? `\n📝 Caption: "${truncatePreview(caption, 80)}"` : '';
+      await ctx.reply(`${icon} Видео добавлено (${count}/10).${captionLine}\n\n/done — отправить.`);
     } else {
-      await ctx.reply(`⚠️ Лимит 10 медиа. /done — отправить, /cancel — начать заново.`);
+      await ctx.reply(`⚠️ Лимит 10 медиа.`);
     }
     return;
   }
@@ -2707,6 +3016,37 @@ export async function handleVideo(ctx) {
     caption: ctx.message.caption || '',
   });
   await ctx.reply(`🎬 Видео добавлено в секцию ${sectionId}.`);
+}
+
+// Documents (PDFs, .md, любые file uploads) идут в /bug или /prompt session.
+// В visual-review sections — не support'им документы (нет use case).
+export async function handleDocument(ctx) {
+  const bugSession = await getBugSession(ctx.from.id).catch(() => null);
+  const promptSess = bugSession ? null : await getPromptSession(ctx.from.id).catch(() => null);
+  const sess = bugSession || promptSess;
+  if (!sess) {
+    await ctx.reply('Документы принимаются только в /bug или /prompt сессии.');
+    return;
+  }
+  const doc = ctx.message.document;
+  const caption = (ctx.message.caption || '').trim();
+  const appendFn = bugSession ? appendBugMedia : appendPromptMedia;
+  const ok = await appendFn(ctx.from.id, {
+    type: 'document',
+    file_id: doc.file_id,
+    file_name: doc.file_name || null,
+    mime_type: doc.mime_type || null,
+    caption,
+  });
+  if (ok) {
+    const count = (sess.media?.length || 0) + 1;
+    const icon = bugSession ? '🐛' : '💡';
+    const nameLine = doc.file_name ? ` (${doc.file_name})` : '';
+    const captionLine = caption ? `\n📝 Caption: "${truncatePreview(caption, 80)}"` : '';
+    await ctx.reply(`${icon} Документ${nameLine} добавлен (${count}/10).${captionLine}\n\n/done — отправить.`);
+  } else {
+    await ctx.reply(`⚠️ Лимит 10 медиа.`);
+  }
 }
 
 export async function handleText(ctx) {
@@ -2735,6 +3075,9 @@ export async function handleText(ctx) {
       case 'bug_reject':
         await processBugRejectInput(ctx, text, Number(pending.extras?.issueNumber));
         return;
+      case 'prompt_reject':
+        await processPromptRejectInput(ctx, text, Number(pending.extras?.issueNumber));
+        return;
       default: break; // unknown pending → fall through
     }
   }
@@ -2746,6 +3089,17 @@ export async function handleText(ctx) {
     await ctx.reply(
       `🐛 Добавил текст к bug-репорту. Сейчас: ${bugSession.media?.length || 0} медиа, описание ` +
       `${(bugSession.description?.length || 0) + text.length} символов.\n\n/done — отправить. /cancel — отменить.`
+    );
+    return;
+  }
+
+  // /prompt session priority (same pattern as bug).
+  const promptSess = await getPromptSession(ctx.from.id).catch(() => null);
+  if (promptSess) {
+    await appendPromptText(ctx.from.id, text);
+    await ctx.reply(
+      `💡 Добавил текст к prompt. Сейчас: ${promptSess.media?.length || 0} медиа, описание ` +
+      `${(promptSess.description?.length || 0) + text.length} символов.\n\n/done — отправить. /cancel — отменить.`
     );
     return;
   }

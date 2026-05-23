@@ -13,7 +13,8 @@ import {
   handleScout, handleScoutReview,
   handleBlock, handleUnblock, handleAbandon, handleReassign,
   handleBug, handleDone, handleBugReview,
-  handleCallback, handlePhoto, handleVideo, handleText,
+  handlePrompt, handlePromptReview,
+  handleCallback, handlePhoto, handleVideo, handleDocument, handleText,
 } from '../../scripts/bot/lib/commands.mjs';
 import { assertEnv, getEnv } from '../../scripts/bot/config.mjs';
 import { getRoleOverride, isApprovedAssistant,
@@ -51,7 +52,8 @@ const COMMON_COMMANDS = [
   { command: 'unblock',  description: 'N — снять паузу' },
   { command: 'abandon',  description: 'N <причина> — отпустить задачу' },
   { command: 'bug',      description: 'Сообщить о проблеме бота (с фото/видео)' },
-  { command: 'done',     description: 'Отправить начатый bug-репорт' },
+  { command: 'prompt',   description: 'Отправить задачу/идею для Claude Code' },
+  { command: 'done',     description: 'Отправить начатый bug/prompt' },
   { command: 'whoami',   description: 'Моя роль + chat_id' },
   { command: 'playbook', description: 'Типовые сценарии для роли' },
 ];
@@ -78,6 +80,7 @@ const OWNER_COMMANDS = [
   { command: 'scout_review', description: 'Inbox новых scouted' },
   { command: 'reassign',     description: 'N <chatId> — передать задачу другому' },
   { command: 'bug_review',   description: 'Inbox bug-репортов от ассистентов' },
+  { command: 'prompt_review', description: 'Inbox prompts (задач/идей) от ассистентов' },
   { command: 'role',         description: 'Debug: смена эффективной роли (30 мин)' },
 ];
 
@@ -310,13 +313,16 @@ function getBot() {
   bot.command('unblock',      handleUnblock);
   bot.command('abandon',      handleAbandon);
   bot.command('reassign',     handleReassign);
-  bot.command('bug',          handleBug);
-  bot.command('done',         handleDone);
-  bot.command('bug_review',   handleBugReview);
+  bot.command('bug',           handleBug);
+  bot.command('done',          handleDone);
+  bot.command('bug_review',    handleBugReview);
+  bot.command('prompt',        handlePrompt);
+  bot.command('prompt_review', handlePromptReview);
 
   bot.on('callback_query',   handleCallback);
   bot.on('message:photo',    handlePhoto);
   bot.on('message:video',    handleVideo);
+  bot.on('message:document', handleDocument);
   bot.on('message:text',     handleText);
 
   // Last-resort error catch — keeps webhook returning 200 to TG so updates

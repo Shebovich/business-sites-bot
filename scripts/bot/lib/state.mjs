@@ -74,6 +74,9 @@ const K = {
   // /bug feature — pending session collecting media + description before /done submit.
   // TTL 30 min — abandoned sessions roll off.
   bugSession:       (chatId) => `bug-session:${chatId}`,
+  // /prompt feature — same shape as bug session (text + media + documents),
+  // semantically different: «task/idea для Claude Code» вместо «проблема бота».
+  promptSession:    (chatId) => `prompt-session:${chatId}`,
   // Claude Code ↔ TG bridge: question + answer storage.
   // Claude POSTs question → bot shows inline keyboard owner → owner taps →
   // bot stores answer → Claude polls /api/claude/answer.
@@ -583,6 +586,60 @@ export async function appendBugMedia(chatId, media) {
 
 export async function clearBugSession(chatId) {
   await getRedis().del(K.bugSession(chatId));
+}
+
+// ---- /prompt session (mirror /bug) -------------------------------------
+
+const PROMPT_SESSION_TTL = 30 * 60;
+
+export async function getPromptSession(chatId) {
+  const raw = await getRedis().get(K.promptSession(chatId));
+  if (!raw) return null;
+  try { return typeof raw === 'string' ? JSON.parse(raw) : raw; }
+  catch { return null; }
+}
+
+export async function startPromptSession(chatId, initialDescription = '') {
+  const value = JSON.stringify({
+    description: String(initialDescription || '').slice(0, 4000),
+    media: [],
+    started_at: new Date().toISOString(),
+  });
+  await getRedis().set(K.promptSession(chatId), value, { ex: PROMPT_SESSION_TTL });
+}
+
+export async function appendPromptText(chatId, text) {
+  const session = await getPromptSession(chatId);
+  if (!session) return false;
+  const sep = session.description ? '\n\n' : '';
+  session.description = (session.description + sep + text).slice(0, 16000);
+  await getRedis().set(K.promptSession(chatId), JSON.stringify(session), { ex: PROMPT_SESSION_TTL });
+  return true;
+}
+
+export async function appendPromptMedia(chatId, media) {
+  const session = await getPromptSession(chatId);
+  if (!session) return false;
+  session.media = session.media || [];
+  if (session.media.length >= 10) return false;
+  const caption = (media.caption || '').trim();
+  session.media.push({
+    type: media.type, // 'photo' | 'video' | 'document'
+    file_id: media.file_id,
+    file_name: media.file_name || null,  // documents have file_name
+    mime_type: media.mime_type || null,
+    caption,
+  });
+  if (caption) {
+    const sep = session.description ? '\n\n' : '';
+    session.description = (session.description + sep + caption).slice(0, 16000);
+  }
+  await getRedis().set(K.promptSession(chatId), JSON.stringify(session), { ex: PROMPT_SESSION_TTL });
+  return true;
+}
+
+export async function clearPromptSession(chatId) {
+  await getRedis().del(K.promptSession(chatId));
 }
 
 // ---- Claude Code ↔ TG bridge --------------------------------------------

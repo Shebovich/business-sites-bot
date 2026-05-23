@@ -122,6 +122,14 @@ export default async function handler(req, res) {
           `🐛 Bug-репорт #${issue.number}\n\n${issue.title}\n${issue.html_url}\n\n/bug_review`
         );
       }
+    } else if (label === LABELS.PROMPT_PENDING) {
+      // /prompt — assistant submitted, owner reviews via /prompt_review.
+      const viaTgBot = /Sent by .* via TG bot/i.test(issue.body || '');
+      if (!viaTgBot) {
+        await pushNotification(
+          `💡 Prompt #${issue.number}\n\n${issue.title}\n${issue.html_url}\n\n/prompt_review`
+        );
+      }
     } else if (label === LABELS.AWAITING_SCOUT) {
       // Safety net (Phase 1.1 hotfix). processScoutInput уже пушит owner'у
       // напрямую — но если issue создан не через бот (scout-agent локально

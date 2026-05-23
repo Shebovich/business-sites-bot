@@ -43,6 +43,15 @@ export const LABELS = {
   BUG: 'bug',
   WONT_FIX: 'wont-fix',
   BUG_FIXED: 'bug-fixed',
+  // /prompt feature — assistant или owner sends idea/task для Claude Code.
+  // prompt-pending  → assistant submitted, ждёт owner approve
+  // prompt          → owner confirmed → Monitor подхватывает → я execute
+  // prompt-rejected → owner rejected с причиной, closed
+  // prompt-done     → executed + closed
+  PROMPT_PENDING: 'prompt-pending',
+  PROMPT: 'prompt',
+  PROMPT_REJECTED: 'prompt-rejected',
+  PROMPT_DONE: 'prompt-done',
 };
 
 // Sections a user can submit photos for. Each entry: id, label (RU display),
