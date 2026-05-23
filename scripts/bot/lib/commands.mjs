@@ -231,8 +231,9 @@ export async function processScoutInput(ctx, input) {
   }
   const requesterName = ctx.from?.username ? `@${ctx.from.username}` : `id:${ctx.from?.id}`;
   const issuePayload = buildScoutIssue({ parsed, requesterName, requesterRole: ctx.role });
+  let created;
   try {
-    const created = await createIssue(issuePayload);
+    created = await createIssue(issuePayload);
     await ctx.reply(
       `🔍 Заявка на скаут принята #${created.number}.\n\n` +
       `Запусти на ноуте \`/process-tg-tasks\` — skill сверит, что это, и предложит к approve.`,
@@ -241,6 +242,41 @@ export async function processScoutInput(ctx, input) {
   } catch (e) {
     console.error('[scout] createIssue failed:', e.message);
     await ctx.reply(`❌ Не смог создать issue: ${e.message}`);
+    return;
+  }
+
+  // Bind the issue to the requester so future notifications (scout_reject,
+  // approve, etc.) can DM them back. Без этого reject-причина пишется в
+  // issue, но ассистент её не видит.
+  try {
+    await setAssistantChatId(created.number, ctx.from?.id);
+  } catch (e) {
+    console.warn('[scout] setAssistantChatId failed:', e.message);
+  }
+
+  // Direct push owner. Github-webhook не реагирует на `awaiting-scout`
+  // (он триггерится только когда Claude Code skill поднимет label до
+  // `scouted`). Без этого пинга owner не знает что ассистент предложил
+  // лид, пока сам не запустит /process-tg-tasks. Пушим только если
+  // requester — НЕ owner (не дублировать самому себе).
+  if (ctx.role !== 'owner') {
+    const ownerId = getEnv('TG_OWNER_CHAT_ID');
+    if (ownerId && String(ownerId) !== String(ctx.from?.id)) {
+      const kindHint = parsed.kind === '2gis' ? '2GIS'
+        : parsed.kind === 'instagram' ? 'IG'
+        : parsed.kind === 'existing_website' ? 'site'
+        : parsed.kind === 'name' ? 'name'
+        : parsed.kind;
+      const text = `🔍 Новая заявка на скаут #${created.number} от ${requesterName} (${kindHint}).\n\n` +
+                   `${created.html_url}\n\n` +
+                   `Запусти /process-tg-tasks на Mac — skill разведает + поставит \`scouted\`, ` +
+                   `после чего сможешь /scout_review approve/reject.`;
+      try {
+        await sendMessage(ownerId, text);
+      } catch (e) {
+        console.warn('[scout] owner push failed:', e.message);
+      }
+    }
   }
 }
 

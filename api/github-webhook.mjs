@@ -105,6 +105,22 @@ export default async function handler(req, res) {
       await pushNotification(
         `🔍 Новый лид #${issue.number}${author}\n\n${issue.title}\n${issue.html_url}\n\n/scout_review для approve.`
       );
+    } else if (label === LABELS.AWAITING_SCOUT) {
+      // Safety net (Phase 1.1 hotfix). processScoutInput уже пушит owner'у
+      // напрямую — но если issue создан не через бот (scout-agent локально
+      // через `gh issue create --label awaiting-scout`), процесс-tg-tasks
+      // ничего не знает, owner иначе не получит сигнала вообще.
+      // De-dup от processScoutInput push'а: проверяем `Requested by … via TG bot`
+      // в body — если есть, push уже был отправлен ботом.
+      const requested = extractRequestedBy(issue.body);
+      const viaTgBot = /Requested by .* via TG bot/i.test(issue.body || '');
+      if (!viaTgBot) {
+        const author = requested ? ` (предложил ${requested})` : '';
+        await pushNotification(
+          `🔍 Заявка на скаут #${issue.number}${author}\n\n${issue.title}\n${issue.html_url}\n\n` +
+          `Запусти /process-tg-tasks — skill разведает.`
+        );
+      }
     }
   } catch (e) {
     console.error('[gh-webhook] handler error:', e.message);
