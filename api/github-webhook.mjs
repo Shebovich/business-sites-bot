@@ -59,7 +59,7 @@ export default async function handler(req, res) {
     if (label === LABELS.NEEDS_VISUAL_REVIEW) {
       await registerActiveTask(issue.number, {
         issue_number: issue.number,
-        slug: extractSlug(issue.title),
+        slug: extractSlug(issue.title, issue.body),
         title: issue.title,
         url: issue.html_url,
         added_at: new Date().toISOString(),
@@ -71,7 +71,7 @@ export default async function handler(req, res) {
       );
     } else if (label === LABELS.BUILT) {
       // Phase 3.5 — push BOTH (owner + assignee) с 3 кнопками после tester green.
-      const slug = extractSlug(issue.title);
+      const slug = extractSlug(issue.title, issue.body);
       const previewUrl = `https://${slug}.vercel.app`;
       const kb = new InlineKeyboard()
         .text('✅ Готово / В pitch', `done_review:${issue.number}:approve`)
@@ -137,10 +137,43 @@ export default async function handler(req, res) {
   res.statusCode = 200; res.end('ok');
 }
 
-function extractSlug(title) {
-  // Issues are titled like "Скиф — нужен сайт" or "[slug] ..." — best-effort.
-  const m = title.match(/\[([a-z0-9-]+)\]/i);
-  return m ? m[1] : title.split(/\s+/)[0];
+// Reserved tokens that look like slugs but are pipeline markers.
+// e.g. "[scout-request] IG @mana_minsk" — the bracket payload is buildScoutIssue's
+// placeholder marker, NOT the actual slug. Slug for that issue is "mana-minsk".
+const RESERVED_SLUGS = new Set([
+  'scout-request', 'scouted', 'scout',
+  'needs', 'needs-fix', 'needs-visual-review',
+  'ready', 'ready-for-pitch',
+  'awaiting', 'awaiting-scout', 'awaiting-claude-process', 'awaiting-owner-review',
+  'building', 'built',
+  'design-pending', 'design-approved', 'design-ready',
+  'pitched', 'sold', 'lost', 'ghosted', 'wont-do',
+  'archived', 'bot-test',
+]);
+
+function extractSlug(title, body) {
+  // 1. Body `Slug: xxx` или metadata block (researcher/builder заполняют).
+  if (body) {
+    const bodySlug = body.match(/^\s*slug:\s*([a-z0-9-]+)\s*$/im);
+    if (bodySlug && !RESERVED_SLUGS.has(bodySlug[1].toLowerCase())) {
+      return bodySlug[1];
+    }
+  }
+  // 2. Title `[slug]` if not reserved.
+  const titleBracket = title.match(/\[([a-z0-9-]+)\]/i);
+  if (titleBracket && !RESERVED_SLUGS.has(titleBracket[1].toLowerCase())) {
+    return titleBracket[1];
+  }
+  // 3. Body `IG @handle` — derive slug from IG handle (mana_minsk → mana-minsk).
+  if (body) {
+    const igHandle = body.match(/IG (?:handle:\s*)?@?([a-z0-9_.]+)/i);
+    if (igHandle) {
+      return igHandle[1].toLowerCase().replace(/[_.]+/g, '-').replace(/^-|-$/g, '');
+    }
+  }
+  // 4. Last resort: first word of title, sanitized.
+  const fallback = (title || '').split(/\s+/)[0].toLowerCase().replace(/[^a-z0-9-]/g, '');
+  return fallback || `issue-unknown`;
 }
 
 // Bot writes "Requested by @username via TG" in the issue body when an
