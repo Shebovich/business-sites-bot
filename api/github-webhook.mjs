@@ -78,23 +78,31 @@ export default async function handler(req, res) {
         .text('🔄 Ещё правки',       `done_review:${issue.number}:revise`)
         .row()
         .url('📲 Открыть preview',   previewUrl);
+      const replyMarkup = { inline_keyboard: kb.inline_keyboard };
       const text = `🧱 #${issue.number} собран (${slug}).\n\n` +
                    `Preview: ${previewUrl}\nIssue: ${issue.html_url}\n\n` +
                    `[✅ Готово] → ready-for-pitch · [🔄 Ещё правки] → новый круг.`;
-      await pushBoth(issue.number, text, { reply_markup: kb });
+      await pushBoth(issue.number, text, { reply_markup: replyMarkup });
     } else if (label === LABELS.DESIGN_PENDING) {
       // Phase 3.4 — push owner с inline A/B + preview moodboard.
+      // Grammy InlineKeyboard → плоский объект для TG raw API (без method bindings).
       const kb = new InlineKeyboard()
         .text('🅰 Variant A', `design_pick:${issue.number}:A`)
         .text('🅱 Variant B', `design_pick:${issue.number}:B`)
         .row()
         .text('🖼 Moodboard', `design_pick:${issue.number}:preview`);
-      await pushNotification(
-        `🎨 #${issue.number} — design-director выдал 2 варианта.\n\n` +
-        `${issue.title}\n${issue.html_url}\n\n` +
-        `Открой design_brief.md в issue, выбери A или B.`,
-        { reply_markup: kb }
-      );
+      const replyMarkup = { inline_keyboard: kb.inline_keyboard };
+      try {
+        await pushNotification(
+          `🎨 #${issue.number} — design-director выдал 2 варианта.\n\n` +
+          `${issue.title}\n${issue.html_url}\n\n` +
+          `Открой design_brief.md в issue, выбери A или B.`,
+          { reply_markup: replyMarkup }
+        );
+      } catch (e) {
+        console.error('[gh-webhook DESIGN_PENDING] push failed:', e?.message, e?.stack);
+        throw e;
+      }
     } else if (label === LABELS.READY_FOR_PITCH) {
       // M3c — Q30 quiet push: single line, no buttons. Batch review via /pitch_review.
       await pushNotification(`🎉 #${issue.number} готов к pitch — /pitch_review`);
@@ -123,7 +131,8 @@ export default async function handler(req, res) {
       }
     }
   } catch (e) {
-    console.error('[gh-webhook] handler error:', e.message);
+    console.error('[gh-webhook] handler error:', e?.message);
+    console.error('[gh-webhook] stack:', e?.stack);
   }
 
   res.statusCode = 200; res.end('ok');
