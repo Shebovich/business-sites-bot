@@ -426,8 +426,7 @@ export async function handleScoutReview(ctx) {
     tagged.push({ ...t, _status: 'scouted' });
   }
   if (tagged.length === 0) {
-    await ctx.reply('Нет лидов на review.\n\n• `awaiting-scout` — ассистент предложил, ждёт resolve\n• `scouted` — Claude Code разведал, ждёт approve',
-      { parse_mode: 'Markdown' });
+    await ctx.reply('Нет лидов на review.\n\n• awaiting-scout — ассистент предложил, ждёт resolve\n• scouted — Claude Code разведал, ждёт approve');
     return;
   }
   await ctx.reply(`🔍 Лидов на review: ${tagged.length}`);
@@ -435,7 +434,7 @@ export async function handleScoutReview(ctx) {
     const name = t.venue_name || t.slug || t.title || `issue-${t.issue_number}`;
     const statusIcon = t._status === 'awaiting' ? '📝 raw' : '✅ resolved';
     const hint = t._status === 'awaiting'
-      ? '\n_Не разведан — approve = доверить researcher\'у, reject = отказ + push ассистенту._'
+      ? '\nНе разведан — approve = доверить researcher\'у, reject = отказ + push ассистенту.'
       : '';
     const kb = new InlineKeyboard()
       .text('✅ Approve', `scout_review:${t.issue_number}:approve`)
@@ -443,9 +442,11 @@ export async function handleScoutReview(ctx) {
       .row()
       .text('⏭ Skip', `scout_review:${t.issue_number}:skip`)
       .text('👁 Open', `scout_review:${t.issue_number}:open`);
+    // No parse_mode — title типа `[scout-request] IG @mana_minsk` ломает Markdown
+    // ([..] = link, _ = italic). Plain text безопаснее.
     await ctx.reply(
       `[${statusIcon}] ${name} · #${t.issue_number}\n${t.html_url}${hint}`,
-      { reply_markup: kb, parse_mode: 'Markdown' }
+      { reply_markup: kb }
     );
   }
 }

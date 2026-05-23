@@ -324,11 +324,17 @@ function getBot() {
 const handler = async (req, res) => {
   try {
     const cb = webhookCallback(getBot(), 'http');
-    return cb(req, res);
+    await cb(req, res);
   } catch (e) {
-    console.error('[bot] webhook init failed:', e.message);
-    res.statusCode = 500;
-    res.end('bot init error');
+    // CRITICAL: TG ретраит webhook при любом 4xx/5xx до часов. Один баг
+    // в одном handler'е → infinite spam → real-world incident. Поэтому
+    // мы ВСЕГДА возвращаем 200 OK на webhook, даже когда внутри упало.
+    // Ошибки логируем в Vercel — там видно через `vercel logs`.
+    console.error('[bot] webhook handler threw (suppressing 5xx to avoid TG retry storm):', e);
+    if (!res.headersSent) {
+      res.statusCode = 200;
+      res.end('ok-with-error');
+    }
   }
 };
 
