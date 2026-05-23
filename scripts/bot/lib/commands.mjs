@@ -207,10 +207,9 @@ export async function handleBug(ctx) {
   await ctx.reply(
     arg
       ? `🐛 Bug-репорт начат с текстом: "${truncatePreview(arg, 80)}".\n\n` +
-        `Прикрепи фото/видео (опционально, до 10 шт). Шли ещё текст чтобы дополнить.\n\n` +
+        `Прикрепи фото/видео (опционально, до 10 шт) — **caption у медиа тоже идёт в описание**. Шли ещё текст чтобы дополнить.\n\n` +
         `/done — отправить. /cancel — отменить.`
-      : `🐛 Опиши проблему одним сообщением. Можешь приложить фото или видео — приму всё что пришлёшь.\n\n` +
-        `Когда готов — /done. Чтобы отменить — /cancel.`
+      : `🐛 Опиши проблему — текстом, фото/видео, или фото+подписью (caption тоже сохраняется).\n\nПриму всё что пришлёшь (до 10 медиа).\n\nКогда готов — /done. Отменить — /cancel.`
   );
 }
 
@@ -2581,13 +2580,18 @@ export async function handlePhoto(ctx) {
   if (bugSession) {
     const sizes = ctx.message.photo;
     const largest = sizes[sizes.length - 1];
+    const caption = (ctx.message.caption || '').trim();
     const ok = await appendBugMedia(ctx.from.id, {
       type: 'photo',
       file_id: largest.file_id,
-      caption: ctx.message.caption || '',
+      caption,
     });
     if (ok) {
-      await ctx.reply(`🐛 Фото добавлено в bug-репорт (${(bugSession.media?.length || 0) + 1}/10). /done — отправить.`);
+      const count = (bugSession.media?.length || 0) + 1;
+      const captionLine = caption
+        ? `\n📝 Caption принят как описание: "${truncatePreview(caption, 80)}"`
+        : '';
+      await ctx.reply(`🐛 Фото добавлено в bug-репорт (${count}/10).${captionLine}\n\n/done — отправить.`);
     } else {
       await ctx.reply(`⚠️ Лимит 10 медиа. /done — отправить, /cancel — начать заново.`);
     }
@@ -2617,13 +2621,18 @@ export async function handleVideo(ctx) {
   // /bug session priority.
   const bugSession = await getBugSession(ctx.from.id).catch(() => null);
   if (bugSession) {
+    const caption = (ctx.message.caption || '').trim();
     const ok = await appendBugMedia(ctx.from.id, {
       type: 'video',
       file_id: ctx.message.video.file_id,
-      caption: ctx.message.caption || '',
+      caption,
     });
     if (ok) {
-      await ctx.reply(`🐛 Видео добавлено в bug-репорт (${(bugSession.media?.length || 0) + 1}/10). /done — отправить.`);
+      const count = (bugSession.media?.length || 0) + 1;
+      const captionLine = caption
+        ? `\n📝 Caption принят как описание: "${truncatePreview(caption, 80)}"`
+        : '';
+      await ctx.reply(`🐛 Видео добавлено в bug-репорт (${count}/10).${captionLine}\n\n/done — отправить.`);
     } else {
       await ctx.reply(`⚠️ Лимит 10 медиа. /done — отправить, /cancel — начать заново.`);
     }

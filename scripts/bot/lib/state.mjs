@@ -564,11 +564,19 @@ export async function appendBugMedia(chatId, media) {
   if (!session) return false;
   session.media = session.media || [];
   if (session.media.length >= 10) return false; // TG sendMediaGroup limit
+  const caption = (media.caption || '').trim();
   session.media.push({
     type: media.type, // 'photo' | 'video'
     file_id: media.file_id,
-    caption: media.caption || '',
+    caption,
   });
+  // Auto-merge caption в description чтобы issue title был descriptive
+  // (вместо «(no description, media-only)»). User просто посылает фото
+  // с подписью — caption становится частью bug description.
+  if (caption) {
+    const sep = session.description ? '\n\n' : '';
+    session.description = (session.description + sep + caption).slice(0, 8000);
+  }
   await getRedis().set(K.bugSession(chatId), JSON.stringify(session), { ex: BUG_SESSION_TTL });
   return true;
 }
