@@ -492,23 +492,35 @@ export async function processScoutRejectInput(ctx, reason, issueNumber) {
   } catch (e) {
     console.warn('[scout_reject] closeIssue failed:', e.message);
   }
+  let pushStatus = 'skipped'; // 'sent' | 'no_chat_id' | 'failed' | 'skipped'
+  let assistantId = null;
   try {
-    const assistantId = await getAssistantChatId(issueNumber);
+    assistantId = await getAssistantChatId(issueNumber);
     if (assistantId) {
       await sendMessage(assistantId,
         `❌ Твой scout #${issueNumber} отклонён owner'ом.\n\n` +
         `Причина: ${cleanReason}\n\n` +
         `Следующий лид — /scout {URL или название}.`
       );
+      pushStatus = 'sent';
+    } else {
+      pushStatus = 'no_chat_id';
     }
   } catch (e) {
     console.warn('[scout_reject] assistant push failed:', e.message);
+    pushStatus = 'failed';
   }
 
+  const pushLine = pushStatus === 'sent'
+    ? `📨 DM ассистенту отправлен.`
+    : pushStatus === 'no_chat_id'
+    ? `⚠️ DM ассистенту НЕ отправлен — assistantChatId не записан в Redis (заявка создана до 2026-05-23 fix). Сообщи ассистенту вручную про reject.`
+    : `⚠️ DM ассистенту НЕ отправлен (push упал — см. vercel logs).`;
+
   await ctx.reply(
-    `✅ #${issueNumber} → \`wont-do\` + closed.` +
-    (commentOk ? ' Комментарий в issue + push ассистенту.' : ' (комментарий не записан — см. логи)'),
-    { parse_mode: 'Markdown' }
+    `#${issueNumber} → wont-do + closed.\n` +
+    (commentOk ? `📝 Комментарий в issue добавлен.` : `⚠️ Комментарий не записан (см. логи).`) + '\n' +
+    pushLine
   );
 }
 
@@ -1901,9 +1913,14 @@ export async function handleCallback(ctx) {
         return;
       }
       // Symmetric with reject: push assignee if it wasn't owner-init.
+      let approvePushStatus = 'skipped';
       try {
         const assistantId = await getAssistantChatId(issueNumber);
-        if (assistantId && String(assistantId) !== String(ctx.from?.id)) {
+        if (!assistantId) {
+          approvePushStatus = 'no_chat_id';
+        } else if (String(assistantId) === String(ctx.from?.id)) {
+          approvePushStatus = 'skipped'; // owner-init, не пингуем самого себя
+        } else {
           await commentOnIssue(issueNumber, `✅ **Approved by owner** — passed to researcher pipeline.`)
             .catch(e => console.warn('[scout_approve] commentOnIssue failed:', e.message));
           await sendMessage(assistantId,
@@ -1911,9 +1928,18 @@ export async function handleCallback(ctx) {
             `Уходит в researcher → design-director → builder. ` +
             `Когда сайт соберётся, увидишь в /list для visual review.`
           );
+          approvePushStatus = 'sent';
         }
       } catch (e) {
         console.warn('[scout_approve] assignee push failed:', e.message);
+        approvePushStatus = 'failed';
+      }
+      if (approvePushStatus === 'no_chat_id') {
+        await ctx.reply(`⚠️ DM ассистенту НЕ отправлен — assistantChatId не записан в Redis (заявка до 2026-05-23 fix). Сообщи вручную.`);
+      } else if (approvePushStatus === 'failed') {
+        await ctx.reply(`⚠️ DM ассистенту НЕ отправлен (push упал — см. vercel logs).`);
+      } else if (approvePushStatus === 'sent') {
+        await ctx.reply(`📨 DM ассистенту отправлен.`);
       }
     } else if (action === 'reject') {
       // Phase 1.1 — explicit reject. Ask for reason, dispatch via cmd-pending
