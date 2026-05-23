@@ -74,6 +74,11 @@ const K = {
   // /bug feature — pending session collecting media + description before /done submit.
   // TTL 30 min — abandoned sessions roll off.
   bugSession:       (chatId) => `bug-session:${chatId}`,
+  // Claude Code ↔ TG bridge: question + answer storage.
+  // Claude POSTs question → bot shows inline keyboard owner → owner taps →
+  // bot stores answer → Claude polls /api/claude/answer.
+  claudeQuestion:   (sessionId) => `claude-q:${sessionId}`,
+  claudeAnswer:     (sessionId) => `claude-a:${sessionId}`,
 };
 
 // ---- Role override (debug) -----------------------------------------------
@@ -570,6 +575,39 @@ export async function appendBugMedia(chatId, media) {
 
 export async function clearBugSession(chatId) {
   await getRedis().del(K.bugSession(chatId));
+}
+
+// ---- Claude Code ↔ TG bridge --------------------------------------------
+
+const CLAUDE_Q_TTL = 30 * 60; // 30 min — abandoned questions roll off
+
+export async function setClaudeQuestion(sessionId, payload) {
+  await getRedis().set(K.claudeQuestion(sessionId), JSON.stringify({
+    ...payload,
+    sent_at: new Date().toISOString(),
+  }), { ex: CLAUDE_Q_TTL });
+}
+
+export async function getClaudeQuestion(sessionId) {
+  const raw = await getRedis().get(K.claudeQuestion(sessionId));
+  if (!raw) return null;
+  try { return typeof raw === 'string' ? JSON.parse(raw) : raw; }
+  catch { return null; }
+}
+
+export async function setClaudeAnswer(sessionId, key, by) {
+  await getRedis().set(K.claudeAnswer(sessionId), JSON.stringify({
+    key,
+    by,
+    answered_at: new Date().toISOString(),
+  }), { ex: CLAUDE_Q_TTL });
+}
+
+export async function getClaudeAnswer(sessionId) {
+  const raw = await getRedis().get(K.claudeAnswer(sessionId));
+  if (!raw) return null;
+  try { return typeof raw === 'string' ? JSON.parse(raw) : raw; }
+  catch { return null; }
 }
 
 // Convenience for auto-stale sweep — returns all task numbers with

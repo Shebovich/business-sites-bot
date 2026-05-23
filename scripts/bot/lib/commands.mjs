@@ -18,7 +18,8 @@ import { getCurrentTask, setCurrentTask, setActiveSection, getActiveSection,
          getActiveTask, setActiveTask, clearActiveTask,
          touchTask, setPitchInfo, getPitchInfo,
          getBugSession, startBugSession, appendBugText, appendBugMedia,
-         clearBugSession } from './state.mjs';
+         clearBugSession,
+         getClaudeQuestion, setClaudeAnswer, getClaudeAnswer } from './state.mjs';
 import { buildTaskListKeyboard, buildSectionKeyboard,
          buildOwnerPushKeyboard, buildPreviewKeyboard } from './keyboard.mjs';
 import { LABELS, GITHUB_REPO, getEnv } from '../config.mjs';
@@ -2049,6 +2050,29 @@ export async function handleCallback(ctx) {
     await ctx.reply(
       `📝 Напиши замечания одним сообщением — отправлю ассистенту и сохраню в issue #${issueNumber}.\n\n` +
       `Отмена — /cancel.`
+    );
+    return;
+  }
+
+  // claude_ans:{sessionId}:{key} — owner отвечает на вопрос от Claude Code.
+  if (data.startsWith('claude_ans:')) {
+    if (ctx.role !== 'owner') return;
+    // Format: claude_ans:<sessionId>:<key> — sessionId может содержать `-` но не `:`.
+    const rest = data.slice('claude_ans:'.length);
+    const lastColon = rest.lastIndexOf(':');
+    if (lastColon < 1) return;
+    const sessionId = rest.slice(0, lastColon);
+    const key = rest.slice(lastColon + 1);
+    const existing = await getClaudeAnswer(sessionId).catch(() => null);
+    if (existing) {
+      await ctx.reply(`⚠️ Уже отвечено ранее: "${existing.key}". Новый ответ "${key}" проигнорирован.`);
+      return;
+    }
+    const q = await getClaudeQuestion(sessionId).catch(() => null);
+    await setClaudeAnswer(sessionId, key, String(ctx.from?.id));
+    const qText = q?.question ? truncatePreview(q.question, 100) : '(вопрос не найден в кэше)';
+    await ctx.reply(
+      `✅ Ответ "${key}" сохранён.\n\nClaude Code получит при следующем polling.\n\nВопрос был: "${qText}"`
     );
     return;
   }
