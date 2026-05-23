@@ -16,7 +16,9 @@ import { getCurrentTask, setCurrentTask, setActiveSection, getActiveSection,
          getTaskAssignee, setTaskAssignee, clearTaskAssignee,
          getTaskBlocker, setTaskBlocker, clearTaskBlocker,
          getActiveTask, setActiveTask, clearActiveTask,
-         touchTask, setPitchInfo, getPitchInfo } from './state.mjs';
+         touchTask, setPitchInfo, getPitchInfo,
+         getBugSession, startBugSession, appendBugText, appendBugMedia,
+         clearBugSession } from './state.mjs';
 import { buildTaskListKeyboard, buildSectionKeyboard,
          buildOwnerPushKeyboard, buildPreviewKeyboard } from './keyboard.mjs';
 import { LABELS, GITHUB_REPO, getEnv } from '../config.mjs';
@@ -171,6 +173,210 @@ function escapeHtml(s) {
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;');
+}
+
+// ---- /bug — report a bot/system issue with media -----------------------
+//
+// Flow:
+//   /bug [text]       — open session (text optional, can be added later)
+//   <any photo/video> — appended к session media (up to 10 per TG limit)
+//   <any text>        — appended к session description
+//   /done             — submit: create GH issue with label `bug-pending`
+//                       (assistant) or `bug` (owner direct). Push owner if assistant.
+//   /cancel           — drop session
+//
+// Owner /bug_review → list pending → tap card → detail view with media gallery
+//                     → [✅ Confirm] (→ label `bug`) | [❌ Reject] (→ wont-fix + close + push)
+
+export async function handleBug(ctx) {
+  if (ctx.role === 'unknown') return; // middleware already handled
+  const chatId = String(ctx.from?.id);
+  const arg = (ctx.match || '').trim();
+
+  const existing = await getBugSession(chatId);
+  if (existing) {
+    // Re-issuing /bug resets the session — pre-existing draft state is dropped.
+    // Owner UX safeguard: tell user.
+    await ctx.reply(
+      `⚠️ У тебя уже есть начатый bug-репорт. Сброшу старую сессию (медиа: ${existing.media?.length || 0}).\n\n` +
+      `Опиши новую проблему. Прикрепи фото/видео если есть. /done — отправить, /cancel — отменить.`
+    );
+  }
+  await startBugSession(chatId, arg);
+  await ctx.reply(
+    arg
+      ? `🐛 Bug-репорт начат с текстом: "${truncatePreview(arg, 80)}".\n\n` +
+        `Прикрепи фото/видео (опционально, до 10 шт). Шли ещё текст чтобы дополнить.\n\n` +
+        `/done — отправить. /cancel — отменить.`
+      : `🐛 Опиши проблему одним сообщением. Можешь приложить фото или видео — приму всё что пришлёшь.\n\n` +
+        `Когда готов — /done. Чтобы отменить — /cancel.`
+  );
+}
+
+export async function handleDone(ctx) {
+  const chatId = String(ctx.from?.id);
+  const session = await getBugSession(chatId);
+  if (!session) {
+    await ctx.reply('Нет начатого bug-репорта. /bug чтобы начать.');
+    return;
+  }
+  if (!session.description && (!session.media || session.media.length === 0)) {
+    await ctx.reply('Сессия пустая — нечего отправлять. Опиши проблему или приложи медиа, потом /done.');
+    return;
+  }
+  const reporter = ctx.from?.username ? `@${ctx.from.username}` : `id:${ctx.from?.id}`;
+  const isOwner = ctx.role === 'owner';
+  const label = isOwner ? LABELS.BUG : LABELS.BUG_PENDING;
+  const title = `[bug] ${truncatePreview(session.description || '(no description, media-only)', 60)}`;
+
+  const mediaLines = (session.media || []).map((m, i) =>
+    `- ${i + 1}. ${m.type === 'video' ? '🎥 video' : '📷 photo'} · file_id: \`${m.file_id}\`` +
+    (m.caption ? ` · caption: "${truncatePreview(m.caption, 60)}"` : '')
+  );
+
+  const body = [
+    `Reported by ${reporter} (${ctx.role}) via TG bot.`,
+    '',
+    '## Description',
+    session.description || '(no text — media-only report)',
+    '',
+    mediaLines.length ? `## Media (${mediaLines.length})` : '',
+    ...mediaLines,
+    '',
+    `<!-- bot-bug-v1 -->`,
+    `reporter_chat_id: ${chatId}`,
+    `started_at: ${session.started_at}`,
+    `submitted_at: ${new Date().toISOString()}`,
+    `<!-- /bot-bug-v1 -->`,
+  ].filter(Boolean).join('\n');
+
+  let created;
+  try {
+    created = await createIssue({ title, body, labels: [label] });
+  } catch (e) {
+    await ctx.reply(`❌ Не смог создать bug issue: ${e.message}`);
+    return;
+  }
+  // Bind reporter to issue for future DM (reject/confirm push back).
+  try { await setAssistantChatId(created.number, chatId); }
+  catch (e) { console.warn('[bug] setAssistantChatId failed:', e.message); }
+
+  await clearBugSession(chatId);
+
+  if (isOwner) {
+    await ctx.reply(
+      `✅ Bug #${created.number} сохранён сразу как \`bug\` (owner direct).\n${created.html_url}`,
+      { parse_mode: 'Markdown' }
+    );
+    return;
+  }
+
+  // Assistant flow — push owner for review.
+  await ctx.reply(
+    `✅ Bug #${created.number} отправлен owner'у на review.\n${created.html_url}\n\n` +
+    `Получишь push когда решит — confirm or reject.`
+  );
+  const ownerId = getEnv('TG_OWNER_CHAT_ID');
+  if (ownerId && String(ownerId) !== chatId) {
+    try {
+      await sendMessage(ownerId,
+        `🐛 Новый bug-репорт #${created.number} от ${reporter}.\n\n` +
+        `${truncatePreview(session.description || '(no text — media-only)', 200)}\n\n` +
+        `Media: ${session.media?.length || 0} шт.\n\n` +
+        `/bug_review чтобы посмотреть + approve/reject.`
+      );
+    } catch (e) {
+      console.warn('[bug] owner push failed:', e.message);
+    }
+  }
+}
+
+export async function handleBugReview(ctx) {
+  if (ctx.role !== 'owner') {
+    await ctx.reply('Только owner может review bugs.');
+    return;
+  }
+  const pending = await safeGetActiveTasks(LABELS.BUG_PENDING);
+  const active = await safeGetActiveTasks(LABELS.BUG);
+  if (pending.length === 0 && active.length === 0) {
+    await ctx.reply('Нет bug-репортов. Когда ассистент пришлёт /bug — увидишь здесь.');
+    return;
+  }
+  const kb = new InlineKeyboard();
+  for (const t of pending) {
+    kb.text(`🐛 pending · #${t.issue_number} · ${truncatePreview(t.venue_name || t.title || '', 50)}`,
+      `bug_view:${t.issue_number}`).row();
+  }
+  for (const t of active) {
+    kb.text(`🔧 active · #${t.issue_number} · ${truncatePreview(t.venue_name || t.title || '', 50)}`,
+      `bug_view:${t.issue_number}`).row();
+  }
+  const summary = [
+    `🐛 Bug-репортов: ${pending.length + active.length}`,
+    `   pending review: ${pending.length}`,
+    `   confirmed active: ${active.length}`,
+    '',
+    'Tap карточку — увидишь описание, медиа, кнопки confirm/reject.',
+  ].join('\n');
+  await ctx.reply(summary, { reply_markup: kb });
+}
+
+export async function processBugRejectInput(ctx, reason, issueNumber) {
+  if (ctx.role !== 'owner') return;
+  if (!Number.isFinite(issueNumber)) {
+    await ctx.reply('⚠️ Не нашёл номер bug — попробуй /bug_review заново.');
+    return;
+  }
+  const cleanReason = (reason || '').trim() || 'причина не указана';
+  const ownerName = ctx.from?.username ? `@${ctx.from.username}` : (ctx.from?.first_name || 'owner');
+  const today = new Date().toISOString().slice(0, 10);
+
+  let commentOk = false;
+  try {
+    await commentOnIssue(issueNumber,
+      `❌ **Rejected by ${ownerName} on ${today}.**\n\n${cleanReason}`);
+    commentOk = true;
+  } catch (e) { console.warn('[bug_reject] comment failed:', e.message); }
+
+  // Determine current label (bug-pending or bug — both valid for reject path).
+  let currentLabel = null;
+  try {
+    const issue = await getIssue(issueNumber);
+    const labels = (issue.labels || []).map(l => l.name);
+    if (labels.includes(LABELS.BUG_PENDING)) currentLabel = LABELS.BUG_PENDING;
+    else if (labels.includes(LABELS.BUG)) currentLabel = LABELS.BUG;
+  } catch (e) { console.warn('[bug_reject] getIssue failed:', e.message); }
+
+  try { await setLabel(issueNumber, LABELS.WONT_FIX, currentLabel); }
+  catch (e) { console.warn('[bug_reject] setLabel failed:', e.message); }
+
+  try { await closeIssue(issueNumber, { stateReason: 'not_planned' }); }
+  catch (e) { console.warn('[bug_reject] closeIssue failed:', e.message); }
+
+  let pushStatus = 'no_chat_id';
+  try {
+    const reporterId = await getAssistantChatId(issueNumber);
+    if (reporterId && String(reporterId) !== String(ctx.from?.id)) {
+      await sendMessage(reporterId,
+        `❌ Твой bug-репорт #${issueNumber} отклонён owner'ом.\n\nПричина: ${cleanReason}`);
+      pushStatus = 'sent';
+    } else if (reporterId) {
+      pushStatus = 'self';
+    }
+  } catch (e) {
+    console.warn('[bug_reject] reporter push failed:', e.message);
+    pushStatus = 'failed';
+  }
+
+  const pushLine = pushStatus === 'sent' ? '📨 DM reporter\'у отправлен.'
+    : pushStatus === 'self' ? '(reporter = owner, без DM)'
+    : pushStatus === 'no_chat_id' ? '⚠️ DM не отправлен (reporter не найден).'
+    : '⚠️ DM упал — см. vercel logs.';
+
+  await ctx.reply(
+    `#${issueNumber} → wont-fix + closed.\n` +
+    (commentOk ? '📝 Комментарий добавлен.' : '⚠️ Комментарий не записан.') + '\n' + pushLine
+  );
 }
 
 // M3b — Q25/Q26/Q26.5: scout from bot.
@@ -1115,10 +1321,12 @@ export async function handleSkip(ctx) {
 }
 
 export async function handleCancel(ctx) {
+  const hadBug = !!(await getBugSession(ctx.from.id).catch(() => null));
   await clearCurrentTask(ctx.from.id);
   await clearFeedbackPending(ctx.from.id);
   await clearCommandPending(ctx.from.id);
-  await ctx.reply('Текущая задача и pending-ввод сброшены.');
+  await clearBugSession(ctx.from.id);
+  await ctx.reply(`Сброшено${hadBug ? ' (включая bug-сессию)' : ''}.`);
 }
 
 // ---- M2.5: /done_all (owner) + /auto_photos (owner) + /submit (assistant) ----
@@ -1845,6 +2053,98 @@ export async function handleCallback(ctx) {
     return;
   }
 
+  // bug_view:N — детальный view одного bug-репорта с media gallery.
+  if (data.startsWith('bug_view:')) {
+    if (ctx.role !== 'owner') return;
+    const issueNumber = Number(data.slice('bug_view:'.length));
+    if (!Number.isFinite(issueNumber)) return;
+    let issue;
+    try { issue = await getIssue(issueNumber); }
+    catch (e) { await ctx.reply(`❌ Не удалось получить #${issueNumber}: ${e.message}`); return; }
+    const labels = (issue.labels || []).map(l => l.name);
+    const isPending = labels.includes(LABELS.BUG_PENDING);
+    const isActive = labels.includes(LABELS.BUG);
+    const statusLine = isPending ? '🐛 pending — ждёт review'
+      : isActive ? '🔧 active — в backlog'
+      : `⚠️ status: ${labels.join(', ') || 'нет'}`;
+    // Parse body — extract description + file_ids.
+    const body = (issue.body || '');
+    const reporter = body.match(/Reported by\s+(\S+)/)?.[1] || 'unknown';
+    const descMatch = body.match(/## Description\s*\n([\s\S]*?)(\n##|\n<!--|$)/);
+    const description = descMatch ? descMatch[1].trim() : '(no description)';
+    const fileIds = [...body.matchAll(/file_id:\s*`([^`]+)`/g)].map(m => m[1]);
+    const types = [...body.matchAll(/- \d+\.\s*([📷🎥])/g)].map(m => m[1] === '🎥' ? 'video' : 'photo');
+
+    // Send media gallery first (if any) — sendMediaGroup для 2+, sendPhoto/sendVideo для 1.
+    if (fileIds.length > 0) {
+      try {
+        if (fileIds.length === 1) {
+          const method = types[0] === 'video' ? 'replyWithVideo' : 'replyWithPhoto';
+          await ctx[method](fileIds[0]);
+        } else {
+          const media = fileIds.map((fid, i) => ({
+            type: types[i] || 'photo',
+            media: fid,
+          }));
+          await ctx.replyWithMediaGroup(media);
+        }
+      } catch (e) {
+        await ctx.reply(`⚠️ Не удалось загрузить media: ${e.message}`);
+      }
+    }
+
+    const lines = [
+      `🐛 Bug #${issueNumber} · ${statusLine}`,
+      `Reporter: ${reporter}`,
+      `${issue.html_url}`,
+      '',
+      truncatePreview(description, 800),
+    ];
+    const actionKb = new InlineKeyboard()
+      .text('✅ Confirm', `bug_review:${issueNumber}:confirm`)
+      .text('❌ Reject', `bug_review:${issueNumber}:reject`)
+      .row()
+      .text('🔙 К списку', `bug_review:${issueNumber}:back`);
+    await ctx.reply(lines.join('\n'), { reply_markup: actionKb });
+    return;
+  }
+
+  // bug_review:N:confirm|reject|back — owner action on bug.
+  if (data.startsWith('bug_review:')) {
+    if (ctx.role !== 'owner') return;
+    const [, nStr, action] = data.split(':');
+    const issueNumber = Number(nStr);
+    if (!Number.isFinite(issueNumber)) return;
+    if (action === 'confirm') {
+      try {
+        // pending → bug (active). Owner direct /bug уже имеет bug — idempotent.
+        await setLabel(issueNumber, LABELS.BUG, LABELS.BUG_PENDING);
+        const ownerName = ctx.from?.username ? `@${ctx.from.username}` : 'owner';
+        await commentOnIssue(issueNumber, `✅ **Confirmed by ${ownerName}** — added to active backlog.`)
+          .catch(e => console.warn('[bug_confirm] comment failed:', e.message));
+        await ctx.reply(`✅ #${issueNumber} → \`bug\` (active backlog).`, { parse_mode: 'Markdown' });
+        // Push reporter — symmetric.
+        const reporterId = await getAssistantChatId(issueNumber).catch(() => null);
+        if (reporterId && String(reporterId) !== String(ctx.from?.id)) {
+          await sendMessage(reporterId,
+            `✅ Твой bug-репорт #${issueNumber} confirmed owner'ом — в backlog. Спасибо!`
+          ).catch(e => console.warn('[bug_confirm] push failed:', e.message));
+        }
+      } catch (e) {
+        await ctx.reply(`❌ confirm failed: ${e.message}`);
+      }
+    } else if (action === 'reject') {
+      await setCommandPending(String(ctx.from?.id), 'bug_reject', { issueNumber });
+      await ctx.reply(
+        `❌ #${issueNumber}: напиши причину reject одной строкой — отправлю reporter'у + закрою wont-fix.\n\n` +
+        `Отмена — /cancel.`
+      );
+    } else if (action === 'back') {
+      await handleBugReview(ctx);
+    }
+    return;
+  }
+
   // scout_view:N — детальный view одного лида (вызывается из inline keyboard
   // в /scout_review summary). Показывает title + status + body excerpt + кнопки.
   if (data.startsWith('scout_view:')) {
@@ -2252,6 +2552,24 @@ async function runFeedback(ctx, issueNumber, text) {
 }
 
 export async function handlePhoto(ctx) {
+  // /bug session priority — appending media to bug draft instead of section upload.
+  const bugSession = await getBugSession(ctx.from.id).catch(() => null);
+  if (bugSession) {
+    const sizes = ctx.message.photo;
+    const largest = sizes[sizes.length - 1];
+    const ok = await appendBugMedia(ctx.from.id, {
+      type: 'photo',
+      file_id: largest.file_id,
+      caption: ctx.message.caption || '',
+    });
+    if (ok) {
+      await ctx.reply(`🐛 Фото добавлено в bug-репорт (${(bugSession.media?.length || 0) + 1}/10). /done — отправить.`);
+    } else {
+      await ctx.reply(`⚠️ Лимит 10 медиа. /done — отправить, /cancel — начать заново.`);
+    }
+    return;
+  }
+
   const task = await getCurrentTask(ctx.from.id);
   const sectionId = await getActiveSection(ctx.from.id);
   if (!task || !sectionId) {
@@ -2272,6 +2590,22 @@ export async function handlePhoto(ctx) {
 }
 
 export async function handleVideo(ctx) {
+  // /bug session priority.
+  const bugSession = await getBugSession(ctx.from.id).catch(() => null);
+  if (bugSession) {
+    const ok = await appendBugMedia(ctx.from.id, {
+      type: 'video',
+      file_id: ctx.message.video.file_id,
+      caption: ctx.message.caption || '',
+    });
+    if (ok) {
+      await ctx.reply(`🐛 Видео добавлено в bug-репорт (${(bugSession.media?.length || 0) + 1}/10). /done — отправить.`);
+    } else {
+      await ctx.reply(`⚠️ Лимит 10 медиа. /done — отправить, /cancel — начать заново.`);
+    }
+    return;
+  }
+
   const task = await getCurrentTask(ctx.from.id);
   const sectionId = await getActiveSection(ctx.from.id);
   if (!task || !sectionId) {
@@ -2311,8 +2645,22 @@ export async function handleText(ctx) {
       case 'scout_comment':
         await processScoutCommentInput(ctx, text, Number(pending.extras?.issueNumber));
         return;
+      case 'bug_reject':
+        await processBugRejectInput(ctx, text, Number(pending.extras?.issueNumber));
+        return;
       default: break; // unknown pending → fall through
     }
+  }
+
+  // /bug session priority — appending text to bug draft instead of normal routing.
+  const bugSession = await getBugSession(ctx.from.id).catch(() => null);
+  if (bugSession) {
+    await appendBugText(ctx.from.id, text);
+    await ctx.reply(
+      `🐛 Добавил текст к bug-репорту. Сейчас: ${bugSession.media?.length || 0} медиа, описание ` +
+      `${(bugSession.description?.length || 0) + text.length} символов.\n\n/done — отправить. /cancel — отменить.`
+    );
+    return;
   }
 
   // M3a — Q20: owner is responding to a [💬 Замечания] prompt. Takes

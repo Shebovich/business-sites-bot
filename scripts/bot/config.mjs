@@ -34,6 +34,15 @@ export const LABELS = {
   // v5 Flow X — owner approve scouted → researcher запускается с этим лейблом.
   // Заменяет legacy NEEDS_VISUAL_REVIEW в approve handler.
   APPROVED: 'approved',
+  // /bug feature — assistant или owner reports баг бота.
+  // bug-pending → assistant submitted, ждёт owner review
+  // bug         → owner confirmed, active в backlog
+  // wont-fix    → owner rejected с причиной, closed
+  // bug-fixed   → owner закрыл как resolved
+  BUG_PENDING: 'bug-pending',
+  BUG: 'bug',
+  WONT_FIX: 'wont-fix',
+  BUG_FIXED: 'bug-fixed',
 };
 
 // Sections a user can submit photos for. Each entry: id, label (RU display),

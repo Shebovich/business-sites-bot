@@ -12,6 +12,7 @@ import {
   handlePitchReview, handleSold, handleLost, handleGhosted, handleStats,
   handleScout, handleScoutReview,
   handleBlock, handleUnblock, handleAbandon, handleReassign,
+  handleBug, handleDone, handleBugReview,
   handleCallback, handlePhoto, handleVideo, handleText,
 } from '../../scripts/bot/lib/commands.mjs';
 import { assertEnv, getEnv } from '../../scripts/bot/config.mjs';
@@ -49,6 +50,8 @@ const COMMON_COMMANDS = [
   { command: 'block',    description: 'N <причина> — поставить задачу на паузу' },
   { command: 'unblock',  description: 'N — снять паузу' },
   { command: 'abandon',  description: 'N <причина> — отпустить задачу' },
+  { command: 'bug',      description: 'Сообщить о проблеме бота (с фото/видео)' },
+  { command: 'done',     description: 'Отправить начатый bug-репорт' },
   { command: 'whoami',   description: 'Моя роль + chat_id' },
   { command: 'playbook', description: 'Типовые сценарии для роли' },
 ];
@@ -74,6 +77,7 @@ const OWNER_COMMANDS = [
   { command: 'scout',        description: 'Следующий лид или ad-hoc' },
   { command: 'scout_review', description: 'Inbox новых scouted' },
   { command: 'reassign',     description: 'N <chatId> — передать задачу другому' },
+  { command: 'bug_review',   description: 'Inbox bug-репортов от ассистентов' },
   { command: 'role',         description: 'Debug: смена эффективной роли (30 мин)' },
 ];
 
@@ -306,6 +310,9 @@ function getBot() {
   bot.command('unblock',      handleUnblock);
   bot.command('abandon',      handleAbandon);
   bot.command('reassign',     handleReassign);
+  bot.command('bug',          handleBug);
+  bot.command('done',         handleDone);
+  bot.command('bug_review',   handleBugReview);
 
   bot.on('callback_query',   handleCallback);
   bot.on('message:photo',    handlePhoto);

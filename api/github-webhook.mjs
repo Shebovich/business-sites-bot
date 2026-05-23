@@ -113,6 +113,15 @@ export default async function handler(req, res) {
       await pushNotification(
         `🔍 Новый лид #${issue.number}${author}\n\n${issue.title}\n${issue.html_url}\n\n/scout_review для approve.`
       );
+    } else if (label === LABELS.BUG_PENDING) {
+      // /bug — assistant submitted, owner should review via /bug_review.
+      // De-dup от handleDone direct push: проверяем "Reported by ... via TG bot" в body.
+      const viaTgBot = /Reported by .* via TG bot/i.test(issue.body || '');
+      if (!viaTgBot) {
+        await pushNotification(
+          `🐛 Bug-репорт #${issue.number}\n\n${issue.title}\n${issue.html_url}\n\n/bug_review`
+        );
+      }
     } else if (label === LABELS.AWAITING_SCOUT) {
       // Safety net (Phase 1.1 hotfix). processScoutInput уже пушит owner'у
       // напрямую — но если issue создан не через бот (scout-agent локально

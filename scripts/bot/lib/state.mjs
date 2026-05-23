@@ -71,6 +71,9 @@ const K = {
   // JSON { at, channel }. Used by scheduled-poke for 3d/7d/14d reminders +
   // 21d auto-ghosted suggestion.
   pitchInfo:        (issueNumber) => `task:${issueNumber}:pitch`,
+  // /bug feature — pending session collecting media + description before /done submit.
+  // TTL 30 min — abandoned sessions roll off.
+  bugSession:       (chatId) => `bug-session:${chatId}`,
 };
 
 // ---- Role override (debug) -----------------------------------------------
@@ -519,6 +522,54 @@ export async function getPitchInfo(issueNumber) {
 
 export async function clearPitchInfo(issueNumber) {
   await getRedis().del(K.pitchInfo(issueNumber));
+}
+
+// ---- /bug feature: pending session --------------------------------------
+
+const BUG_SESSION_TTL = 30 * 60; // 30 min — abandoned sessions roll off
+
+// Returns { description, media: [{type, file_id, caption}], started_at } or null.
+export async function getBugSession(chatId) {
+  const raw = await getRedis().get(K.bugSession(chatId));
+  if (!raw) return null;
+  try { return typeof raw === 'string' ? JSON.parse(raw) : raw; }
+  catch { return null; }
+}
+
+export async function startBugSession(chatId, initialDescription = '') {
+  const value = JSON.stringify({
+    description: String(initialDescription || '').slice(0, 4000),
+    media: [],
+    started_at: new Date().toISOString(),
+  });
+  await getRedis().set(K.bugSession(chatId), value, { ex: BUG_SESSION_TTL });
+}
+
+export async function appendBugText(chatId, text) {
+  const session = await getBugSession(chatId);
+  if (!session) return false;
+  const sep = session.description ? '\n\n' : '';
+  session.description = (session.description + sep + text).slice(0, 8000);
+  await getRedis().set(K.bugSession(chatId), JSON.stringify(session), { ex: BUG_SESSION_TTL });
+  return true;
+}
+
+export async function appendBugMedia(chatId, media) {
+  const session = await getBugSession(chatId);
+  if (!session) return false;
+  session.media = session.media || [];
+  if (session.media.length >= 10) return false; // TG sendMediaGroup limit
+  session.media.push({
+    type: media.type, // 'photo' | 'video'
+    file_id: media.file_id,
+    caption: media.caption || '',
+  });
+  await getRedis().set(K.bugSession(chatId), JSON.stringify(session), { ex: BUG_SESSION_TTL });
+  return true;
+}
+
+export async function clearBugSession(chatId) {
+  await getRedis().del(K.bugSession(chatId));
 }
 
 // Convenience for auto-stale sweep — returns all task numbers with
