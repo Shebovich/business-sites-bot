@@ -11,3 +11,4 @@ Thumbs.db
 # Vercel link/state — recreated by `vercel link`
 .vercel/
 .vercel
+.env.pulled
