@@ -2784,10 +2784,18 @@ async function safeGetActiveTasks(label = LABELS.NEEDS_VISUAL_REVIEW) {
 function parseTaskFromIssue(i) {
   const body = i.body || '';
 
-  // Slug: body `slug:` line, but NOT pseudo-slugs that match label tokens.
+  // Slug: body `slug:` line, but NOT pseudo-slugs that match label tokens
+  // OR placeholder markers like `scout-request`/`bug`.
   const RESERVED_SLUGS = new Set([
-    'scouted', 'needs', 'ready', 'awaiting', 'built', 'building',
-    'pitched', 'sold', 'lost', 'archived', 'rejected',
+    'scouted', 'scout', 'scout-request',
+    'needs', 'needs-fix', 'needs-visual-review',
+    'ready', 'ready-for-pitch',
+    'awaiting', 'awaiting-scout', 'awaiting-claude-process', 'awaiting-owner-review',
+    'building', 'built',
+    'design-pending', 'design-approved', 'design-ready',
+    'pitched', 'sold', 'lost', 'ghosted', 'wont-do',
+    'bug', 'bug-pending', 'bug-fixed', 'wont-fix',
+    'archived', 'rejected', 'bot-test',
   ]);
   let slug = null;
   const bodySlugMatch = body.match(/^\s*slug:\s*([a-z0-9-]+)/im);
@@ -2800,6 +2808,13 @@ function parseTaskFromIssue(i) {
     const titleMatch = i.title?.match(/\[([a-z0-9-]+)\]/i);
     if (titleMatch && !RESERVED_SLUGS.has(titleMatch[1].toLowerCase())) {
       slug = titleMatch[1];
+    }
+  }
+  if (!slug) {
+    // IG handle fallback (e.g. `IG @mana_minsk` → `mana-minsk`).
+    const igHandle = body.match(/IG (?:handle:\s*)?@?([a-z0-9_.]+)/i);
+    if (igHandle) {
+      slug = igHandle[1].toLowerCase().replace(/[_.]+/g, '-').replace(/^-|-$/g, '');
     }
   }
   if (!slug) slug = `issue-${i.number}`;
