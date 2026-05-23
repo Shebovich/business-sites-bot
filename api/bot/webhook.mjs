@@ -326,14 +326,22 @@ const handler = async (req, res) => {
     const cb = webhookCallback(getBot(), 'http');
     await cb(req, res);
   } catch (e) {
-    // CRITICAL: TG ретраит webhook при любом 4xx/5xx до часов. Один баг
-    // в одном handler'е → infinite spam → real-world incident. Поэтому
-    // мы ВСЕГДА возвращаем 200 OK на webhook, даже когда внутри упало.
-    // Ошибки логируем в Vercel — там видно через `vercel logs`.
-    console.error('[bot] webhook handler threw (suppressing 5xx to avoid TG retry storm):', e);
+    // TG ретраит webhook при любом 4xx/5xx — поэтому всегда 200.
+    // Errors → vercel logs (truncated; для full stack используй E2E harness
+    // который читает diagnostic mode через DEBUG_RETURN_ERRORS env).
+    console.error('[bot] webhook handler threw:', e?.message);
+    console.error('[bot] stack:', e?.stack);
     if (!res.headersSent) {
       res.statusCode = 200;
-      res.end('ok-with-error');
+      if (process.env.DEBUG_RETURN_ERRORS === 'true') {
+        res.end(JSON.stringify({
+          ok: false,
+          err: e?.message || String(e),
+          stack: (e?.stack || '').split('\n').slice(0, 10).join(' | '),
+        }));
+      } else {
+        res.end('ok-with-error');
+      }
     }
   }
 };

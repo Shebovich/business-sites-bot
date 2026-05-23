@@ -1703,7 +1703,14 @@ function refFromPhoto(p) {
 
 export async function handleCallback(ctx) {
   const data = ctx.callbackQuery?.data || '';
-  await ctx.answerCallbackQuery();
+  // Best-effort ack — TG требует ответ в 15s, но если id протух / mock /
+  // network flake — handler НЕ должен из-за этого падать (state changes
+  // важнее, чем button spinner).
+  ctx.answerCallbackQuery().catch(e => {
+    if (e?.message && !e.message.includes('query is too old')) {
+      console.warn('[callback] answerCallbackQuery failed:', e.message);
+    }
+  });
 
   // Owner-only: approve/reject pending access request from an unknown chat.
   // Callback data shape: `access:approve:<chatId>` / `access:reject:<chatId>`.
