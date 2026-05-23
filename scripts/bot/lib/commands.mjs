@@ -1991,16 +1991,42 @@ export async function handleCallback(ctx) {
 
   if (data.startsWith('task:')) {
     const issueNumber = Number(data.slice(5));
-    // Check both queues — owner may tap an issue that's already
-    // `awaiting-owner-review` (submitted by assistant) and not in the
-    // default `needs-visual-review` list.
-    const [needsReview, awaitingOwner] = await Promise.all([
+    // Match the 4 buckets shown in /list so any task user sees can be tapped.
+    const [needsReview, awaitingOwner, built, readyForPitch] = await Promise.all([
       safeGetActiveTasks(LABELS.NEEDS_VISUAL_REVIEW),
       ctx.role === 'owner' ? safeGetActiveTasks(LABELS.AWAITING_OWNER_REVIEW) : Promise.resolve([]),
+      safeGetActiveTasks(LABELS.BUILT),
+      safeGetActiveTasks(LABELS.READY_FOR_PITCH),
     ]);
-    const task = [...needsReview, ...awaitingOwner].find(t => t.issue_number === issueNumber);
+    const allTasks = [...needsReview, ...awaitingOwner, ...built, ...readyForPitch];
+    const task = allTasks.find(t => t.issue_number === issueNumber);
     if (!task) {
       await ctx.reply(`Задача #${issueNumber} не найдена в активных. Попробуй /list.`);
+      return;
+    }
+    // For built / ready-for-pitch — show summary + 3-button keyboard (same as
+    // github-webhook push). Skip auto-claim + section keyboard (нет фото-loop).
+    const isBuilt = built.some(t => t.issue_number === issueNumber);
+    const isReadyPitch = readyForPitch.some(t => t.issue_number === issueNumber);
+    if (isBuilt || isReadyPitch) {
+      const previewUrl = task.preview_url || `https://${task.slug}.vercel.app`;
+      const status = isReadyPitch ? '🎉 ready-for-pitch' : '🧱 built (ждёт approve)';
+      const kb = new InlineKeyboard()
+        .text('✅ Готово / В pitch', `done_review:${issueNumber}:approve`)
+        .text('🔄 Ещё правки',       `done_review:${issueNumber}:revise`)
+        .row()
+        .url('📲 Открыть preview',   previewUrl);
+      const lines = [
+        `${task.venue_name || task.slug} · #${issueNumber}`,
+        `Status: ${status}`,
+        `Preview: ${previewUrl}`,
+        `Issue: ${task.html_url}`,
+      ];
+      if (task.instagram) {
+        const handle = task.instagram.replace(/^@/, '');
+        lines.push(`Instagram: ${task.instagram} (https://instagram.com/${handle})`);
+      }
+      await ctx.reply(lines.join('\n'), { reply_markup: kb });
       return;
     }
     // Phase 1.2 — auto-claim ownership + WIP enforcement. Owner exempt.
