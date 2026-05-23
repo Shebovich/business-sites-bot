@@ -4,7 +4,7 @@
 // M2: also handle `built` / `ready-for-pitch` for status updates.
 
 import crypto from 'node:crypto';
-import { LABELS } from '../scripts/bot/config.mjs';
+import { LABELS, getEnv } from '../scripts/bot/config.mjs';
 import { sendMessage } from '../scripts/bot/lib/tg-api.mjs';
 import { registerActiveTask, getTaskAssignee, getAssistantChatId } from '../scripts/bot/lib/state.mjs';
 import { InlineKeyboard } from 'grammy';
@@ -134,7 +134,6 @@ export default async function handler(req, res) {
     console.error('[gh-webhook] handler error:', e?.message);
     console.error('[gh-webhook] stack:', e?.stack);
   }
-
   res.statusCode = 200; res.end('ok');
 }
 
@@ -154,7 +153,9 @@ function extractRequestedBy(body) {
 }
 
 async function pushNotification(text, extra = {}) {
-  const chatId = process.env.TG_OWNER_CHAT_ID;
+  // BOM-aware read: vercel env add через PowerShell pipe иногда вставляет
+  // U+FEFF в начало значения. config.getEnv() стрипает его (+trim).
+  const chatId = getEnv('TG_OWNER_CHAT_ID');
   if (!chatId) {
     console.warn('[gh-webhook] TG_OWNER_CHAT_ID not set — skipping push');
     return;
@@ -166,7 +167,7 @@ async function pushNotification(text, extra = {}) {
 // сообщение и могут tap «Готово» / «Ещё правки». De-dup если они один
 // и тот же chatId.
 async function pushBoth(issueNumber, text, extra = {}) {
-  const ownerId = process.env.TG_OWNER_CHAT_ID;
+  const ownerId = getEnv('TG_OWNER_CHAT_ID');
   const assignee = await getTaskAssignee(issueNumber).catch(() => null);
   const igAssignee = await getAssistantChatId(issueNumber).catch(() => null);
   const targets = new Set([ownerId, assignee, igAssignee].filter(Boolean));
