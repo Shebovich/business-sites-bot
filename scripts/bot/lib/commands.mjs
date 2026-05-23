@@ -429,26 +429,24 @@ export async function handleScoutReview(ctx) {
     await ctx.reply('Нет лидов на review.\n\n• awaiting-scout — ассистент предложил, ждёт resolve\n• scouted — Claude Code разведал, ждёт approve');
     return;
   }
-  await ctx.reply(`🔍 Лидов на review: ${tagged.length}`);
+  // Один reply с inline keyboard — по строке per scout. Tap → детальный
+  // view с действиями (зеркалит /list flow).
+  const kb = new InlineKeyboard();
   for (const t of tagged) {
     const name = t.venue_name || t.slug || t.title || `issue-${t.issue_number}`;
-    const statusIcon = t._status === 'awaiting' ? '📝 raw' : '✅ resolved';
-    const hint = t._status === 'awaiting'
-      ? '\nНе разведан — approve = доверить researcher\'у, reject = отказ + push ассистенту.'
-      : '';
-    const kb = new InlineKeyboard()
-      .text('✅ Approve', `scout_review:${t.issue_number}:approve`)
-      .text('❌ Reject', `scout_review:${t.issue_number}:reject`)
-      .row()
-      .text('⏭ Skip', `scout_review:${t.issue_number}:skip`)
-      .text('👁 Open', `scout_review:${t.issue_number}:open`);
-    // No parse_mode — title типа `[scout-request] IG @mana_minsk` ломает Markdown
-    // ([..] = link, _ = italic). Plain text безопаснее.
-    await ctx.reply(
-      `[${statusIcon}] ${name} · #${t.issue_number}\n${t.html_url}${hint}`,
-      { reply_markup: kb }
-    );
+    const icon = t._status === 'awaiting' ? '📝' : '✅';
+    kb.text(`${icon} ${name} · #${t.issue_number}`, `scout_view:${t.issue_number}`).row();
   }
+  const awaitingCount = tagged.filter(t => t._status === 'awaiting').length;
+  const scoutedCount = tagged.length - awaitingCount;
+  const summary = [
+    `🔍 Лидов на review: ${tagged.length}`,
+    `   📝 raw (от ассистента): ${awaitingCount}`,
+    `   ✅ resolved (Claude Code): ${scoutedCount}`,
+    '',
+    'Тапни на лид — увижу подробности + кнопки approve / reject.',
+  ].join('\n');
+  await ctx.reply(summary, { reply_markup: kb });
 }
 
 // Phase 1.1 — explicit reject path для /scout_review. Owner кнопкой `❌ Reject`
@@ -1828,8 +1826,49 @@ export async function handleCallback(ctx) {
     return;
   }
 
-  // Scout review actions. `scout_review:N:approve|reject|skip|open`. Works
-  // on issues с label `awaiting-scout` ИЛИ `scouted` — approve переводит
+  // scout_view:N — детальный view одного лида (вызывается из inline keyboard
+  // в /scout_review summary). Показывает title + status + body excerpt + кнопки.
+  if (data.startsWith('scout_view:')) {
+    if (ctx.role !== 'owner') return;
+    const issueNumber = Number(data.slice('scout_view:'.length));
+    if (!Number.isFinite(issueNumber)) return;
+    let issue;
+    try {
+      issue = await getIssue(issueNumber);
+    } catch (e) {
+      await ctx.reply(`❌ Не удалось получить #${issueNumber}: ${e.message}`);
+      return;
+    }
+    const labels = (issue.labels || []).map(l => l.name);
+    const isAwaiting = labels.includes(LABELS.AWAITING_SCOUT);
+    const isScouted = labels.includes(LABELS.SCOUTED);
+    const statusLine = isAwaiting
+      ? '📝 raw — ассистент предложил, не разведан'
+      : isScouted
+      ? '✅ resolved — Claude Code разведал, есть чек-лист'
+      : `⚠️ статус: ${labels.join(', ') || 'нет'}`;
+    // Body excerpt — first ~400 chars без metadata blocks.
+    const body = (issue.body || '').replace(/<!--[\s\S]*?-->/g, '').trim();
+    const excerpt = body.length > 500 ? body.slice(0, 500) + '…' : body;
+    const lines = [
+      `${issue.title}`,
+      `#${issueNumber} · ${statusLine}`,
+      issue.html_url,
+      '',
+      excerpt || '(нет описания)',
+    ];
+    const actionKb = new InlineKeyboard()
+      .text('✅ Approve', `scout_review:${issueNumber}:approve`)
+      .text('❌ Reject', `scout_review:${issueNumber}:reject`)
+      .row()
+      .text('⏭ Skip', `scout_review:${issueNumber}:skip`)
+      .text('🔙 К списку', `scout_review:${issueNumber}:back`);
+    await ctx.reply(lines.join('\n'), { reply_markup: actionKb });
+    return;
+  }
+
+  // Scout review actions. `scout_review:N:approve|reject|skip|open|back`.
+  // Works on issues с label `awaiting-scout` ИЛИ `scouted` — approve переводит
   // → `approved`, researcher агент подхватит при /process-tg-tasks.
   if (data.startsWith('scout_review:')) {
     if (ctx.role !== 'owner') return;
@@ -1873,6 +1912,9 @@ export async function handleCallback(ctx) {
     } else if (action === 'open') {
       // Just provide a clickable link — TG renders it.
       await ctx.reply(`https://github.com/Shebovich/business-sites/issues/${issueNumber}`);
+    } else if (action === 'back') {
+      // Re-render the list (как заново /scout_review).
+      await handleScoutReview(ctx);
     }
     return;
   }
