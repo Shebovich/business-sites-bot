@@ -154,10 +154,15 @@ async function saveSlugSectionsToUpstash(slug, sections) {
   }
 }
 
-// Returns per-slug sections OR default vertical sections OR null.
+// Returns per-slug sections OR default vertical sections.
+// Only POSITIVE results are cached в SLUG_MEM — negative misses
+// (file not yet committed / 404) re-attempted on next call. Иначе
+// builder could write sections.json после bot cold start and bot
+// would serve stale default forever.
 export async function getSectionsForSlug(slug, vertical = DEFAULT_VERTICAL) {
   if (!slug) return getSections(vertical);
-  if (SLUG_MEM.has(slug)) return SLUG_MEM.get(slug);
+  const cached = SLUG_MEM.get(slug);
+  if (cached) return cached;
   try {
     let sections = await fetchSlugSectionsFromUpstash(slug);
     if (!sections) {
@@ -165,8 +170,8 @@ export async function getSectionsForSlug(slug, vertical = DEFAULT_VERTICAL) {
       if (sections) await saveSlugSectionsToUpstash(slug, sections);
     }
     if (!sections) {
-      // No per-slug file — fall back на default vertical.
-      SLUG_MEM.set(slug, null);
+      // No per-slug file (yet) — fall back на default. НЕ кэшируем
+      // negative — re-attempt next call (builder может позже залить файл).
       return getSections(vertical);
     }
     SLUG_MEM.set(slug, sections);
@@ -177,10 +182,8 @@ export async function getSectionsForSlug(slug, vertical = DEFAULT_VERTICAL) {
   }
 }
 
-export function getSectionByIdForSlug(slug, id, vertical = DEFAULT_VERTICAL) {
-  const cached = SLUG_MEM.get(slug);
-  if (cached) {
-    return cached.find(s => s.id === id) || null;
-  }
-  return getSectionById(id, vertical);
+export async function getSectionByIdForSlug(slug, id, vertical = DEFAULT_VERTICAL) {
+  // Re-uses getSectionsForSlug (которое handles cache + fallback правильно).
+  const sections = await getSectionsForSlug(slug, vertical);
+  return sections.find(s => s.id === id) || null;
 }
