@@ -234,11 +234,6 @@ export async function processScoutInput(ctx, input) {
   let created;
   try {
     created = await createIssue(issuePayload);
-    await ctx.reply(
-      `🔍 Заявка на скаут принята #${created.number}.\n\n` +
-      `Запусти на ноуте \`/process-tg-tasks\` — skill сверит, что это, и предложит к approve.`,
-      { parse_mode: 'Markdown' }
-    );
   } catch (e) {
     console.error('[scout] createIssue failed:', e.message);
     await ctx.reply(`❌ Не смог создать issue: ${e.message}`);
@@ -276,6 +271,60 @@ export async function processScoutInput(ctx, input) {
       } catch (e) {
         console.warn('[scout] owner push failed:', e.message);
       }
+    }
+  }
+
+  // Ask for optional context note. Без этого Claude Code skill часто не
+  // понимает что именно ассистент имел в виду (например: «у бизнеса есть
+  // ресторан и гостиница — предлагаю сайт для гостиницы»). Owner-init
+  // scout этот flow пропускает — owner сам себе контекст не пишет.
+  if (ctx.role === 'owner') {
+    await ctx.reply(
+      `🔍 Заявка на скаут принята #${created.number}.\n\n` +
+      `Запусти на ноуте \`/process-tg-tasks\` — skill сверит, что это.`,
+      { parse_mode: 'Markdown' }
+    );
+    return;
+  }
+  await setCommandPending(String(ctx.from?.id), 'scout_comment', { issueNumber: created.number });
+  await ctx.reply(
+    `🔍 Заявка #${created.number} принята.\n\n` +
+    `💬 Хочешь приписать примечание — что именно за заведение, почему этот лид, ` +
+    `на что обратить внимание (например: «у бизнеса есть и ресторан и отель — ` +
+    `предлагаю сделать для отеля»). Пришли одним сообщением.\n\n` +
+    `Или /cancel — отправить без комментария.`
+  );
+}
+
+// Phase 1.1 hotfix — добавляет комментарий ассистента к scout заявке +
+// follow-up push owner'у. Триггерится через cmd-pending после
+// processScoutInput когда requester — assistant.
+export async function processScoutCommentInput(ctx, text, issueNumber) {
+  if (!Number.isFinite(issueNumber)) {
+    await ctx.reply('⚠️ Не нашёл номер заявки. /scout заново.');
+    return;
+  }
+  const note = (text || '').trim();
+  if (!note) {
+    await ctx.reply('Пустой текст — пропустил. Заявка ушла без примечания.');
+    return;
+  }
+  const requesterName = ctx.from?.username ? `@${ctx.from.username}` : `id:${ctx.from?.id}`;
+  try {
+    await commentOnIssue(issueNumber, `📝 **Note from ${requesterName}:**\n\n${note}`);
+  } catch (e) {
+    console.warn('[scout_comment] commentOnIssue failed:', e.message);
+  }
+  await ctx.reply(`📝 Примечание добавлено в #${issueNumber}.`);
+
+  const ownerId = getEnv('TG_OWNER_CHAT_ID');
+  if (ownerId && String(ownerId) !== String(ctx.from?.id)) {
+    try {
+      await sendMessage(ownerId,
+        `📝 ${requesterName} дополнил заявку #${issueNumber}:\n\n${note}`
+      );
+    } catch (e) {
+      console.warn('[scout_comment] owner follow-up push failed:', e.message);
     }
   }
 }
@@ -2111,6 +2160,9 @@ export async function handleText(ctx) {
       case 'approve':  await processApproveInput(ctx, text); return;
       case 'scout_reject':
         await processScoutRejectInput(ctx, text, Number(pending.extras?.issueNumber));
+        return;
+      case 'scout_comment':
+        await processScoutCommentInput(ctx, text, Number(pending.extras?.issueNumber));
         return;
       default: break; // unknown pending → fall through
     }
