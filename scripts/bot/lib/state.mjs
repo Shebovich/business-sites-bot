@@ -77,6 +77,10 @@ const K = {
   // /prompt feature — same shape as bug session (text + media + documents),
   // semantically different: «task/idea для Claude Code» вместо «проблема бота».
   promptSession:    (chatId) => `prompt-session:${chatId}`,
+  // Per-task prompts — assistant's thoughts/instructions для specific task
+  // (как enriched note с media support). Included в visual_review_input.json
+  // на /submit; builder Mode fix applies semantically.
+  taskPrompts:      (issueNumber) => `task:${issueNumber}:task_prompts`,
   // Claude Code ↔ TG bridge: question + answer storage.
   // Claude POSTs question → bot shows inline keyboard owner → owner taps →
   // bot stores answer → Claude polls /api/claude/answer.
@@ -640,6 +644,32 @@ export async function appendPromptMedia(chatId, media) {
 
 export async function clearPromptSession(chatId) {
   await getRedis().del(K.promptSession(chatId));
+}
+
+// ---- Per-task prompts (enriched notes с media support) -----------------
+
+export async function addTaskPrompt(issueNumber, entry) {
+  const r = getRedis();
+  const obj = {
+    text: entry.text || '',
+    type: entry.type || 'text',     // 'text' | 'photo' | 'video' | 'document'
+    file_id: entry.file_id || null,
+    file_name: entry.file_name || null,
+    mime_type: entry.mime_type || null,
+    caption: entry.caption || '',
+    added_at: new Date().toISOString(),
+  };
+  await r.rpush(K.taskPrompts(issueNumber), JSON.stringify(obj));
+}
+
+export async function getTaskPrompts(issueNumber) {
+  const r = getRedis();
+  const raw = await r.lrange(K.taskPrompts(issueNumber), 0, -1);
+  return (raw || []).map(s => typeof s === 'string' ? JSON.parse(s) : s);
+}
+
+export async function clearTaskPrompts(issueNumber) {
+  await getRedis().del(K.taskPrompts(issueNumber));
 }
 
 // ---- Claude Code ↔ TG bridge --------------------------------------------

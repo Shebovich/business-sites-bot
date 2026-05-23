@@ -4,7 +4,7 @@
 
 import crypto from 'node:crypto';
 import { getSections, getSectionById } from './sections.mjs';
-import { getPhotos, getTextEdits, getSkipped, getNotes } from './state.mjs';
+import { getPhotos, getTextEdits, getSkipped, getNotes, getTaskPrompts } from './state.mjs';
 
 const TG_MESSAGE_LIMIT = 4096;
 const TEXT_PREVIEW_LIMIT = 150;
@@ -20,13 +20,14 @@ export async function collectSubmitState(issueNumber) {
   const textEdits = await getTextEdits(issueNumber);
   const skipped = await getSkipped(issueNumber);
   const notes = await getNotes(issueNumber);
-  return { sections, textEdits, skipped, notes };
+  const taskPrompts = await getTaskPrompts(issueNumber);
+  return { sections, textEdits, skipped, notes, taskPrompts };
 }
 
 // SHA1 over the *content* of the submit, not the timestamps. Two /submit
 // calls without any change between them produce the same hash → Q24 rejects
 // the second one.
-export function hashSubmitState({ sections, textEdits, skipped, notes }) {
+export function hashSubmitState({ sections, textEdits, skipped, notes, taskPrompts }) {
   const fileTokens = [];
   for (const sectionId of Object.keys(sections).sort()) {
     for (const p of sections[sectionId]) {
@@ -40,9 +41,10 @@ export function hashSubmitState({ sections, textEdits, skipped, notes }) {
     .map(e => `${e.field}=${e.new_value}`)
     .sort();
   const skippedTokens = [...skipped].sort();
-  // Notes are order-significant (sequence of instructions matters for context),
-  // so we hash them as-written, not sorted.
   const noteTokens = (notes || []).map(n => `${n.section || '_'}|${n.text}`);
+  const promptTokens = (taskPrompts || []).map(p =>
+    `${p.type}|${p.file_id || ''}|${p.text || p.caption || ''}`
+  );
 
   const payload = [
     ...fileTokens.sort(),
@@ -52,6 +54,8 @@ export function hashSubmitState({ sections, textEdits, skipped, notes }) {
     ...skippedTokens,
     '---notes---',
     ...noteTokens,
+    '---prompts---',
+    ...promptTokens,
   ].join('\n');
   return crypto.createHash('sha1').update(payload).digest('hex');
 }
@@ -158,6 +162,25 @@ export function buildOwnerPush({ task, who, round, state }) {
         ? (getSectionById(n.section)?.label || n.section)
         : 'общая';
       lines.push(`${idx + 1}. [${where}] ${truncate(n.text, 200)}`);
+    });
+  }
+
+  // Task-prompt block — semantic instructions + media (handled by builder Mode
+  // fix as additional context beyond per-section photos/text edits).
+  const taskPrompts = state.taskPrompts || [];
+  if (taskPrompts.length) {
+    const mediaCount = taskPrompts.filter(p => p.type !== 'text').length;
+    const textCount = taskPrompts.filter(p => p.type === 'text').length;
+    const head = [];
+    if (textCount) head.push(`${textCount} текст`);
+    if (mediaCount) head.push(`${mediaCount} медиа`);
+    lines.push('');
+    lines.push(`💡 Промт задачи (${head.join(', ')}):`);
+    taskPrompts.forEach((p, idx) => {
+      const txt = (p.text || p.caption || '').trim();
+      const tag = p.type === 'text' ? '📝' : p.type === 'photo' ? '🖼' : p.type === 'video' ? '🎬' : '📎';
+      if (txt) lines.push(`${idx + 1}. ${tag} «${truncate(txt, 200)}»`);
+      else     lines.push(`${idx + 1}. ${tag} (без описания)`);
     });
   }
 

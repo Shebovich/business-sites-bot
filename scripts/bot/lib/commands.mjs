@@ -21,6 +21,7 @@ import { getCurrentTask, setCurrentTask, setActiveSection, getActiveSection,
          clearBugSession,
          getPromptSession, startPromptSession, appendPromptText, appendPromptMedia,
          clearPromptSession,
+         addTaskPrompt, getTaskPrompts, clearTaskPrompts,
          getClaudeQuestion, setClaudeAnswer, getClaudeAnswer } from './state.mjs';
 import { buildTaskListKeyboard, buildSectionKeyboard,
          buildOwnerPushKeyboard, buildPreviewKeyboard } from './keyboard.mjs';
@@ -2053,6 +2054,7 @@ async function commitInputAndFlipLabel({ task, mode, ctx, fromLabel, silent = fa
   }
   const skipped_sections = await getSkipped(task.issue_number);
   const notes = await getNotes(task.issue_number);
+  const taskPrompts = await getTaskPrompts(task.issue_number);
 
   // Attach section-scoped notes as `instructions` on each section so
   // apply-fix.mjs and the Claude Code skill see them inline with the photos.
@@ -2064,6 +2066,21 @@ async function commitInputAndFlipLabel({ task, mode, ctx, fromLabel, silent = fa
   // Task-wide notes (no section) preserved separately.
   const general_notes = notes.filter(n => !n.section).map(n => n.text);
 
+  // Per-task prompts — semantic instructions + media that builder Mode fix
+  // applies as additional context (beyond per-section photos/text edits).
+  // Each entry: { type: text|photo|video|document, text?, file_id?, file_name?, mime_type?, caption?, added_at }.
+  // download-refs.mjs понимает `tg:<file_id>` refs; builder читает text как
+  // semantic instructions.
+  const task_prompts = taskPrompts.map(p => ({
+    type: p.type,
+    text: p.text || '',
+    caption: p.caption || '',
+    ref: p.file_id ? `tg:${p.file_id}` : null,
+    file_name: p.file_name || null,
+    mime_type: p.mime_type || null,
+    added_at: p.added_at || null,
+  }));
+
   const inputJson = {
     issue_number: task.issue_number,
     slug: task.slug,
@@ -2073,6 +2090,7 @@ async function commitInputAndFlipLabel({ task, mode, ctx, fromLabel, silent = fa
     text_edits,
     skipped_sections,
     general_notes,
+    task_prompts,
   };
 
   const path = `_data/${task.slug}/visual_review_input.json`;
@@ -2188,6 +2206,25 @@ export async function handleCallback(ctx) {
         `\n\n❌ Rejected.`
       ).catch(() => {});
     }
+    return;
+  }
+
+  // Per-task prompt mode — assistant enters "task prompt" entry mode.
+  // setActiveSection('__task_prompt__') sentinel; handlePhoto/Video/Doc/Text
+  // routes to addTaskPrompt вместо persistTgUpload/addNote.
+  if (data === 'mode:task-prompt') {
+    const task = await getCurrentTask(ctx.from.id);
+    if (!task) { await ctx.reply('Сначала открой задачу через /list.'); return; }
+    await setActiveSection(ctx.from.id, '__task_prompt__');
+    const existing = await getTaskPrompts(task.issue_number);
+    await ctx.reply(
+      `💡 Промт задачи #${task.issue_number}.\n\n` +
+      `Сейчас в задаче: ${existing.length} prompt-entries.\n\n` +
+      `Пиши свои мысли/идеи/инструкции — text + фото + видео + файлы (любая комбинация).\n` +
+      `Каждое сообщение добавляется отдельной entry.\n\n` +
+      `Когда готов — /preview (увидишь сводку) или /submit (отправить owner'у).\n` +
+      `Чтобы вернуться к фото секций — /current.`
+    );
     return;
   }
 
@@ -2970,15 +3007,25 @@ export async function handlePhoto(ctx) {
     await ctx.reply('Сначала открой задачу (/current) и выбери секцию.');
     return;
   }
-  // Largest photo size = last element.
   const sizes = ctx.message.photo;
   const largest = sizes[sizes.length - 1];
+  const caption = ctx.message.caption || '';
+  // Per-task prompt mode (sentinel) → addTaskPrompt вместо section photo.
+  if (sectionId === '__task_prompt__') {
+    await addTaskPrompt(task.issue_number, {
+      type: 'photo', file_id: largest.file_id, caption,
+      text: caption,  // caption serves as text for context
+    });
+    const total = (await getTaskPrompts(task.issue_number)).length;
+    await ctx.reply(`💡 Фото добавлено в промт задачи (всего entries: ${total}).`);
+    return;
+  }
   await persistTgUpload({
     issueNumber: task.issue_number,
     section: sectionId,
     fileId: largest.file_id,
     kind: 'photo',
-    caption: ctx.message.caption || '',
+    caption,
   });
   await ctx.reply(`📷 Фото добавлено в секцию ${sectionId}.`);
 }
@@ -3008,24 +3055,49 @@ export async function handleVideo(ctx) {
     await ctx.reply('Сначала открой задачу (/current) и выбери секцию.');
     return;
   }
+  const caption = ctx.message.caption || '';
+  if (sectionId === '__task_prompt__') {
+    await addTaskPrompt(task.issue_number, {
+      type: 'video', file_id: ctx.message.video.file_id, caption, text: caption,
+    });
+    const total = (await getTaskPrompts(task.issue_number)).length;
+    await ctx.reply(`💡 Видео добавлено в промт задачи (всего entries: ${total}).`);
+    return;
+  }
   await persistTgUpload({
     issueNumber: task.issue_number,
     section: sectionId,
     fileId: ctx.message.video.file_id,
     kind: 'video',
-    caption: ctx.message.caption || '',
+    caption,
   });
   await ctx.reply(`🎬 Видео добавлено в секцию ${sectionId}.`);
 }
 
-// Documents (PDFs, .md, любые file uploads) идут в /bug или /prompt session.
-// В visual-review sections — не support'им документы (нет use case).
+// Documents (PDFs, .md, любые file uploads) идут в /bug или /prompt session
+// либо в per-task prompt (__task_prompt__ sentinel).
 export async function handleDocument(ctx) {
   const bugSession = await getBugSession(ctx.from.id).catch(() => null);
   const promptSess = bugSession ? null : await getPromptSession(ctx.from.id).catch(() => null);
   const sess = bugSession || promptSess;
+  // Per-task prompt mode для документов
   if (!sess) {
-    await ctx.reply('Документы принимаются только в /bug или /prompt сессии.');
+    const task = await getCurrentTask(ctx.from.id);
+    const sectionId = await getActiveSection(ctx.from.id);
+    if (task && sectionId === '__task_prompt__') {
+      const doc = ctx.message.document;
+      const caption = ctx.message.caption || '';
+      await addTaskPrompt(task.issue_number, {
+        type: 'document', file_id: doc.file_id, caption,
+        file_name: doc.file_name || null, mime_type: doc.mime_type || null,
+        text: caption,
+      });
+      const total = (await getTaskPrompts(task.issue_number)).length;
+      const nameLine = doc.file_name ? ` (${doc.file_name})` : '';
+      await ctx.reply(`💡 Документ${nameLine} добавлен в промт задачи (всего entries: ${total}).`);
+      return;
+    }
+    await ctx.reply('Документы принимаются только в /bug, /prompt сессии или в активном «Промт задачи» (через section keyboard).');
     return;
   }
   const doc = ctx.message.document;
@@ -3119,6 +3191,14 @@ export async function handleText(ctx) {
 
   if (!task) {
     await ctx.reply('Открой задачу через /list — тогда я сохраню текст как заметку.');
+    return;
+  }
+
+  // Per-task prompt mode (sentinel) — text becomes prompt entry.
+  if (sectionId === '__task_prompt__') {
+    await addTaskPrompt(task.issue_number, { type: 'text', text });
+    const total = (await getTaskPrompts(task.issue_number)).length;
+    await ctx.reply(`💡 Текст добавлен в промт задачи (всего entries: ${total}): «${truncatePreview(text)}»`);
     return;
   }
 

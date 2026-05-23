@@ -22,6 +22,10 @@ export async function buildSectionKeyboard(issueNumber, slug = null) {
   }
 
   kb.text('📝 Тексты', 'mode:texts').row();
+  // Per-task prompt — assistant пишет text + media + documents (как /prompt
+  // standalone, но привязано к этой задаче). Включается в input.json,
+  // builder Mode fix применяет semantically.
+  kb.text('💡 Промт задачи', 'mode:task-prompt').row();
 
   // Always show "Готово" — assistant /submits to owner, owner /done_all'ит solo.
   // Hash check (Q24) + owner review catch empty/no-op submits, so we don't
