@@ -1898,6 +1898,22 @@ export async function handleCallback(ctx) {
         );
       } catch (e) {
         await ctx.reply(`❌ setLabel failed: ${e.message}`);
+        return;
+      }
+      // Symmetric with reject: push assignee if it wasn't owner-init.
+      try {
+        const assistantId = await getAssistantChatId(issueNumber);
+        if (assistantId && String(assistantId) !== String(ctx.from?.id)) {
+          await commentOnIssue(issueNumber, `✅ **Approved by owner** — passed to researcher pipeline.`)
+            .catch(e => console.warn('[scout_approve] commentOnIssue failed:', e.message));
+          await sendMessage(assistantId,
+            `✅ Твой лид #${issueNumber} апрувнут owner'ом!\n\n` +
+            `Уходит в researcher → design-director → builder. ` +
+            `Когда сайт соберётся, увидишь в /list для visual review.`
+          );
+        }
+      } catch (e) {
+        console.warn('[scout_approve] assignee push failed:', e.message);
       }
     } else if (action === 'reject') {
       // Phase 1.1 — explicit reject. Ask for reason, dispatch via cmd-pending
