@@ -86,7 +86,72 @@ const K = {
   // bot stores answer → Claude polls /api/claude/answer.
   claudeQuestion:   (sessionId) => `claude-q:${sessionId}`,
   claudeAnswer:     (sessionId) => `claude-a:${sessionId}`,
+  // Wave 2 W2 — CC session liveness (locked §24.11 Решение 3, A3 hybrid).
+  // heartbeat: CC sends every 60s while /start-session active. TTL 180s
+  // (3× heartbeat interval — stale если >180s без обновления).
+  // ack: CC sends when подхватывает webhook event для issue. TTL 24h
+  // (for diagnostics — какие issues CC видел/обрабатывал).
+  ccHeartbeat:      (ownerChatId) => `cc:heartbeat:${ownerChatId}`,
+  ccAck:            (issueNumber) => `cc:ack:${issueNumber}`,
+  // Set of (owner)+(issue) pairs нотифицированных как «CC offline, awaits» —
+  // защита от спама: один push на label change, не повторяем пока CC не вернётся.
+  ccOfflineNotified: (ownerChatId, issueNumber) => `cc:offline-notified:${ownerChatId}:${issueNumber}`,
 };
+
+// ---- CC session liveness (W2) --------------------------------------------
+
+const CC_HEARTBEAT_TTL = 180;  // 3× heartbeat interval (60s)
+const CC_ACK_TTL = 24 * 60 * 60;  // 24h
+const CC_OFFLINE_NOTIFIED_TTL = 6 * 60 * 60;  // 6h — chill между повторениями
+
+export async function setCcHeartbeat(ownerChatId, payload = {}) {
+  const data = {
+    started_at: payload.started_at || new Date().toISOString(),
+    last_ping_at: new Date().toISOString(),
+    cwd: payload.cwd || null,
+    host: payload.host || null,
+    pid: payload.pid || null,
+  };
+  await getRedis().set(K.ccHeartbeat(ownerChatId), JSON.stringify(data), { ex: CC_HEARTBEAT_TTL });
+  return data;
+}
+
+export async function getCcHeartbeat(ownerChatId) {
+  const v = await getRedis().get(K.ccHeartbeat(ownerChatId));
+  if (!v) return null;
+  try { return typeof v === 'string' ? JSON.parse(v) : v; }
+  catch { return null; }
+}
+
+export async function isCcAlive(ownerChatId) {
+  return (await getCcHeartbeat(ownerChatId)) !== null;
+}
+
+export async function setCcAck(issueNumber, payload = {}) {
+  const data = {
+    claimed_at: payload.claimed_at || new Date().toISOString(),
+    agent_chain: payload.agent_chain || [],
+    note: payload.note || null,
+  };
+  await getRedis().set(K.ccAck(issueNumber), JSON.stringify(data), { ex: CC_ACK_TTL });
+  return data;
+}
+
+export async function getCcAck(issueNumber) {
+  const v = await getRedis().get(K.ccAck(issueNumber));
+  if (!v) return null;
+  try { return typeof v === 'string' ? JSON.parse(v) : v; }
+  catch { return null; }
+}
+
+// Spam-guard для «CC offline, task awaits» push. TTL 6h.
+export async function markCcOfflineNotified(ownerChatId, issueNumber) {
+  await getRedis().set(K.ccOfflineNotified(ownerChatId, issueNumber), '1', { ex: CC_OFFLINE_NOTIFIED_TTL });
+}
+
+export async function wasCcOfflineNotified(ownerChatId, issueNumber) {
+  return (await getRedis().get(K.ccOfflineNotified(ownerChatId, issueNumber))) === '1';
+}
 
 // ---- Role override (debug) -----------------------------------------------
 

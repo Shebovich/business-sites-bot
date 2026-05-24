@@ -6,8 +6,21 @@
 import crypto from 'node:crypto';
 import { LABELS, getEnv } from '../scripts/bot/config.mjs';
 import { sendMessage } from '../scripts/bot/lib/tg-api.mjs';
-import { registerActiveTask, getTaskAssignee, getAssistantChatId } from '../scripts/bot/lib/state.mjs';
+import { registerActiveTask, getTaskAssignee, getAssistantChatId,
+         getCcHeartbeat, markCcOfflineNotified, wasCcOfflineNotified } from '../scripts/bot/lib/state.mjs';
 import { InlineKeyboard } from 'grammy';
+
+// Wave 2 W3 — labels требующие активной CC сессии (locked §24.11 Решение 2 + 3).
+// При получении webhook на эти labels: check heartbeat; stale → push owner "CC offline".
+// CC fresh → не делаем доп. notify (CC reactive Monitor подхватит сам, M2 discipline).
+const CC_REQUIRED_LABELS = new Set([
+  LABELS.AWAITING_CLAUDE_PROCESS,  // visual-review fix loop
+  'approved',                       // researcher trigger
+  'researched',                     // design-director trigger
+  'design-approved',                // builder Mode skeleton trigger
+]);
+
+const TG_OWNER_CHAT_ID = String(getEnv('TG_OWNER_CHAT_ID') || '').trim();
 
 export const config = { api: { bodyParser: false } };
 
@@ -54,6 +67,36 @@ export default async function handler(req, res) {
   const label = payload.label?.name;
   const issue = payload.issue;
   if (!issue) { res.statusCode = 204; res.end(); return; }
+
+  // Wave 2 W3 — B1 hold-and-notify: если label требует CC и сессия offline,
+  // пингуем owner один раз (per issue, TTL 6h). Не блокируем нормальные handlers
+  // ниже — label остаётся, CC при next /start-session подберёт через gh issue list.
+  if (TG_OWNER_CHAT_ID && CC_REQUIRED_LABELS.has(label)) {
+    try {
+      const hb = await getCcHeartbeat(TG_OWNER_CHAT_ID);
+      if (!hb) {
+        // Stale / never seen heartbeat → CC offline
+        const already = await wasCcOfflineNotified(TG_OWNER_CHAT_ID, issue.number);
+        if (!already) {
+          await sendMessage(
+            TG_OWNER_CHAT_ID,
+            `🔴 CC сессия не активна.\n\n` +
+            `#${issue.number} получил label <b>${label}</b> — работа не подхвачена ` +
+            `(нет heartbeat от Claude Code последние 3 мин).\n\n` +
+            `${issue.html_url}\n\n` +
+            `Открой Claude Code → <code>/start-session</code>. ` +
+            `Issue останется с label, /start-session подхватит автоматически.`,
+            { parse_mode: 'HTML' }
+          );
+          await markCcOfflineNotified(TG_OWNER_CHAT_ID, issue.number);
+        }
+      }
+      // Heartbeat fresh → continue к обычным handlers; CC reactive Monitor сам обработает
+    } catch (e) {
+      console.warn('[gh-webhook B1] heartbeat check failed:', e?.message);
+      // Не блокируем — продолжаем нормальный flow
+    }
+  }
 
   try {
     if (label === LABELS.NEEDS_VISUAL_REVIEW) {
