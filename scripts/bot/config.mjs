@@ -85,6 +85,42 @@ export const URL_PATTERNS = {
   direct_video: /\.(mp4|mov|webm|m4v)(\?.*)?$/i,
 };
 
+// Wave 3 W11 — explicitly unsupported URL hosts.
+// Когда owner кидает ссылку на эти сервисы, бот fail-fast'ит с понятным сообщением
+// «не поддерживается, скинь файлы напрямую в TG» вместо тихого сохранения как заметку.
+// Locked §24.11 Sanity check #3.
+export const UNSUPPORTED_URL_HOSTS = {
+  'drive.google.com':       'Google Drive',
+  'docs.google.com':        'Google Docs/Drive',
+  'photos.google.com':      'Google Photos',
+  'dropbox.com':            'Dropbox',
+  'www.dropbox.com':        'Dropbox',
+  '1drv.ms':                'OneDrive',
+  'onedrive.live.com':      'OneDrive',
+  'mega.nz':                'MEGA',
+  'mega.co.nz':             'MEGA',
+  'we.tl':                  'WeTransfer',
+  'wetransfer.com':         'WeTransfer',
+  'yadi.sk':                'Yandex.Disk',
+  'disk.yandex.by':         'Yandex.Disk',
+  'disk.yandex.ru':         'Yandex.Disk',
+  'disk.yandex.com':        'Yandex.Disk',
+  'cloud.mail.ru':          'Mail.ru Cloud',
+  'icloud.com':             'iCloud',
+  'pcloud.com':             'pCloud',
+};
+
+// Returns matched service name (e.g. "Google Drive") or null if URL is OK or unrecognized differently.
+export function detectUnsupportedHost(url) {
+  if (!url || typeof url !== 'string') return null;
+  try {
+    const u = new URL(url);
+    return UNSUPPORTED_URL_HOSTS[u.hostname.toLowerCase()] || null;
+  } catch {
+    return null;
+  }
+}
+
 // Text-edit instruction detection.
 // "замени X на Y" / "поставь Y в качестве X" / "добавь Z" — see Q16.7.
 export const TEXT_EDIT_VERBS = [

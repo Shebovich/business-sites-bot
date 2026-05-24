@@ -3228,6 +3228,18 @@ export async function handleText(ctx) {
         replyParts.push(`📝 Инструкция: «${truncatePreview(caption)}»`);
       }
       await ctx.reply(replyParts.join('\n'));
+    } else if (res.reason === 'unsupported_domain') {
+      // Wave 3 W11 — fail-fast для Drive/Dropbox/etc. Friendly message + НЕ
+      // сохраняем как note (раньше тихо сохраняли → owner думал что задача
+      // потом выполнится, но никто Drive не fetch'ит → mana saga 2026-05-24).
+      await ctx.reply(
+        `⚠ ${res.service} не поддерживается напрямую.\n\n` +
+        `Бот умеет:\n` +
+        `• Фото/видео drag-drop в чат (рекомендуется — самый надёжный способ)\n` +
+        `• IG post/reel/highlight URLs (instagram.com/p/.../reel/.../stories/highlights/...)\n` +
+        `• Прямые ссылки на медиа (.jpg/.png/.webp/.mp4/.mov/.webm)\n\n` +
+        `${res.service} ссылка не сохранена. Скинь файлы напрямую в TG в секцию ${sectionId}.`
+      );
     } else {
       // URL не распознался — но текст ценный, сохраняем как заметку целиком.
       await addNote(task.issue_number, sectionId, text);

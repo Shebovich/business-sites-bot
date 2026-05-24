@@ -2,7 +2,7 @@
 // downloader. M1: only classification + persistence to Redis. M2 actually
 // invokes downloaders via the GitHub Actions builder-fix workflow.
 
-import { URL_PATTERNS } from '../config.mjs';
+import { URL_PATTERNS, detectUnsupportedHost } from '../config.mjs';
 import { addPhoto } from './state.mjs';
 
 export function classifyUrl(url) {
@@ -17,7 +17,15 @@ export function classifyUrl(url) {
 
 // Persist a URL-based photo input. M2 will pick it up and run the
 // appropriate downloader (ig-download-posts.mjs / yt-dlp / curl).
+//
+// Wave 3 W11: fail-fast на explicit unsupported domains (Drive/Dropbox/etc).
+// Returns reason='unsupported_domain' с serviceName чтобы commands.mjs мог
+// показать friendly «Drive не поддерживается, скинь файлы напрямую» сообщение.
 export async function persistUrlInput({ issueNumber, section, url, caption = '' }) {
+  const unsupportedService = detectUnsupportedHost(url);
+  if (unsupportedService) {
+    return { ok: false, reason: 'unsupported_domain', service: unsupportedService };
+  }
   const type = classifyUrl(url);
   if (!type) return { ok: false, reason: 'unrecognized_url' };
   await addPhoto(issueNumber, section, {
