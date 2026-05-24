@@ -13,11 +13,17 @@ import { InlineKeyboard } from 'grammy';
 // Wave 2 W3 — labels требующие активной CC сессии (locked §24.11 Решение 2 + 3).
 // При получении webhook на эти labels: check heartbeat; stale → push owner "CC offline".
 // CC fresh → не делаем доп. notify (CC reactive Monitor подхватит сам, M2 discipline).
+//
+// Hotfix 2026-05-24: добавлены `bug` и `prompt` после теста #48. Это owner-approved
+// labels для /bug + /prompt flows — CC reactive Monitor их подхватывает (см.
+// .claude/skills/start-session/SKILL.md reactive flow contract).
 const CC_REQUIRED_LABELS = new Set([
   LABELS.AWAITING_CLAUDE_PROCESS,  // visual-review fix loop
   'approved',                       // researcher trigger
   'researched',                     // design-director trigger
   'design-approved',                // builder Mode skeleton trigger
+  'bug',                            // /bug owner-approved → CC fixes
+  'prompt',                         // /prompt owner-approved → CC executes
 ]);
 
 const TG_OWNER_CHAT_ID = String(getEnv('TG_OWNER_CHAT_ID') || '').trim();
