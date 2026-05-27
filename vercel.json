@@ -15,6 +15,9 @@
     },
     "api/intent/poll.mjs": {
       "maxDuration": 30
+    },
+    "api/relay/send.mjs": {
+      "maxDuration": 10
     }
   },
   "rewrites": [
@@ -22,6 +25,7 @@
     { "source": "/api/github-webhook", "destination": "/api/github-webhook.mjs" },
     { "source": "/api/task/notify", "destination": "/api/task/notify.mjs" },
     { "source": "/api/intent/draft", "destination": "/api/intent/draft.mjs" },
-    { "source": "/api/intent/poll", "destination": "/api/intent/poll.mjs" }
+    { "source": "/api/intent/poll", "destination": "/api/intent/poll.mjs" },
+    { "source": "/api/relay/send", "destination": "/api/relay/send.mjs" }
   ]
 }
