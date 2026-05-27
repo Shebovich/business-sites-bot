@@ -3180,16 +3180,41 @@ export async function handleVoice(ctx) {
     return;
   }
 
-  // Intake — text = transcript, media[voice file_id], caption = ''.
+  const preview = transcript.length > 200 ? transcript.slice(0, 200) + '…' : transcript;
+
+  // Owner path: voice не идёт в intent router (тот предназначен для
+  // assistant→owner approve). Owner шлёт voice как direct conversation
+  // c CC. Создаём prompt issue сразу с label `prompt` — CC reactive
+  // подхватит и ответит через relay endpoint.
+  if (ctx.role === 'owner') {
+    await ctx.reply(`🎤 Расшифровка: «${preview}»\n\n⏳ Передаю Claude Code, ответ придёт сюда же.`);
+    try {
+      const { createIssue } = await import('./github-api.mjs');
+      const issue = await createIssue({
+        title: `[owner-voice] ${preview.slice(0, 60)}`,
+        body: `<!-- owner-voice-v1 -->\nfrom_chat: ${ctx.from.id}\nfile_id: ${fileId}\n<!-- /owner-voice-v1 -->\n\n## Transcript\n\n${transcript}\n\n---\n\nCC reactive: read transcript → execute (answer question, run task, etc) → relay reply back to owner via /api/relay/send.`,
+        labels: ['prompt'],
+      });
+      console.log(`[voice owner issue=${issue.number}] transcript queued for CC`);
+    } catch (e) {
+      console.error('[voice owner] createIssue failed:', e.message);
+      await ctx.reply(`🎤 Не смог создать задачу: ${e.message}`);
+    }
+    return;
+  }
+
+  // Assistant path: intent router intake (unchanged).
   const intake = await intakeAssistantInput(ctx, {
     text: transcript,
     media: { type: 'voice', file_id: fileId, caption: '' },
   });
   if (intake.handled) {
-    const preview = transcript.length > 120 ? transcript.slice(0, 120) + '…' : transcript;
     const replyParts = [`🎤 Расшифровка: «${preview}»`];
     if (intake.replyText) replyParts.push('', intake.replyText);
     await ctx.reply(replyParts.join('\n'));
+  } else {
+    // Assistant role but intent router disabled OR active task present.
+    await ctx.reply(`🎤 Расшифровка: «${preview}»\n\n(Голосовые работают только в свободном режиме. Закрой активную задачу через /cancel или напиши текстом для специфичной команды.)`);
   }
 }
 
