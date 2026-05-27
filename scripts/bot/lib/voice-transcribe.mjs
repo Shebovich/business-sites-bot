@@ -9,7 +9,7 @@
 
 import { getEnv } from '../config.mjs';
 
-const GEMINI_MODEL = 'gemini-1.5-flash';
+const GEMINI_MODEL = 'gemini-2.5-flash';
 
 export async function transcribeTgVoice(fileId, { hintLanguage = 'ru' } = {}) {
   const tgToken = getEnv('TG_BOT_TOKEN');
@@ -57,11 +57,15 @@ export async function transcribeTgVoice(fileId, { hintLanguage = 'ru' } = {}) {
   );
   if (!geminiResp.ok) {
     const text = await geminiResp.text();
-    throw new Error(`Gemini API ${geminiResp.status}: ${text.slice(0, 200)}`);
+    console.error(`[voice-transcribe] Gemini ${geminiResp.status}: ${text}`);
+    throw new Error(`Gemini API ${geminiResp.status}: ${text.slice(0, 500)}`);
   }
   const json = await geminiResp.json();
   const transcript = json?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
-  if (!transcript) throw new Error(`Gemini returned no text: ${JSON.stringify(json).slice(0, 200)}`);
+  if (!transcript) {
+    console.error(`[voice-transcribe] Gemini empty response: ${JSON.stringify(json)}`);
+    throw new Error(`Gemini returned no text: ${JSON.stringify(json).slice(0, 500)}`);
+  }
 
   return transcript;
 }
