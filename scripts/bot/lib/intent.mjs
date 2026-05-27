@@ -109,19 +109,71 @@ async function handleClarifyReply(ctx, { section, text, media }) {
 
 // ---- Cron poll (called from /api/intent/poll.mjs every minute) -----------
 //
-// Materialize intents idle ≥30s into GH issues с intent-pending label.
+// Two jobs per tick:
+//   1. Materialize intents idle ≥30s into GH issues с intent-pending label.
+//   2. Auto-expire intent-drafted issues older than 24h (Q6 locked).
 
 export async function runCronPoll({ idleSeconds = 30 } = {}) {
+  const materialized = [];
+  const expired = [];
+
   const idle = await listIdleIntents({ idleSeconds });
-  const results = [];
   for (const intent of idle) {
     try {
-      const result = await materializeIntent(intent);
-      results.push(result);
+      materialized.push(await materializeIntent(intent));
     } catch (e) {
       console.error(`[intent uuid=${intent.uuid}] materialize failed:`, e.message);
-      results.push({ uuid: intent.uuid, ok: false, error: e.message });
+      materialized.push({ uuid: intent.uuid, ok: false, error: e.message });
     }
+  }
+
+  try {
+    const exp = await expireStaleDrafts();
+    expired.push(...exp);
+  } catch (e) {
+    console.error('[intent] expireStaleDrafts failed:', e.message);
+  }
+
+  // Return both for /api/intent/poll JSON response (backward-compatible —
+  // callers reading .filter(r => r.ok) still see materialize results first).
+  return [...materialized, ...expired.map(e => ({ ...e, kind: 'expired' }))];
+}
+
+// Find intent-drafted issues with age >= 24h, comment + close + notify assistant.
+async function expireStaleDrafts() {
+  const { listIssuesByLabel } = await import('./github-api.mjs');
+  const cutoffMs = Date.now() - 24 * 60 * 60 * 1000;
+  const drafted = await listIssuesByLabel(LABELS.INTENT_DRAFTED).catch(() => []);
+  const results = [];
+  for (const issue of drafted) {
+    const createdMs = Date.parse(issue.created_at || 0);
+    if (!createdMs || createdMs > cutoffMs) continue;
+
+    try {
+      await commentOnIssue(issue.number, '⌛ Intent expired (24h без owner action). Если ещё актуально — попроси ассистента переотправить.');
+    } catch (e) { console.warn(`[intent #${issue.number}] expire-comment failed:`, e.message); }
+
+    try {
+      await setLabel(issue.number, LABELS.INTENT_EXPIRED, LABELS.INTENT_DRAFTED);
+    } catch (e) { console.warn(`[intent #${issue.number}] expire-label failed:`, e.message); }
+
+    try {
+      await closeIssue(issue.number, { stateReason: 'not_planned' });
+    } catch (e) { console.warn(`[intent #${issue.number}] expire-close failed:`, e.message); }
+
+    // Notify assistant if chat_id извлекается из body.
+    const m = (issue.body || '').match(/^from_chat:\s*(\d+)/m);
+    if (m) {
+      try {
+        await sendMessage(m[1], `⌛ Твоя заявка #${issue.number} просрочена (24h без ответа Pavel'a). Если ещё нужно — отправь заново.`);
+      } catch (e) { console.warn(`[intent #${issue.number}] expire-notify failed:`, e.message); }
+    }
+
+    const uuidMatch = (issue.body || '').match(/^uuid:\s*([a-f0-9]+)/m);
+    if (uuidMatch) await clearIntentDraft(uuidMatch[1]);
+
+    console.log(`[intent #${issue.number} stage=expired]`);
+    results.push({ issue: issue.number, ok: true });
   }
   return results;
 }
