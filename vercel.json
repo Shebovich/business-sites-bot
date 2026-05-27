@@ -12,12 +12,19 @@
     },
     "api/intent/draft.mjs": {
       "maxDuration": 10
+    },
+    "api/intent/poll.mjs": {
+      "maxDuration": 30
     }
   },
   "rewrites": [
     { "source": "/api/bot/webhook", "destination": "/api/bot/webhook.mjs" },
     { "source": "/api/github-webhook", "destination": "/api/github-webhook.mjs" },
     { "source": "/api/task/notify", "destination": "/api/task/notify.mjs" },
-    { "source": "/api/intent/draft", "destination": "/api/intent/draft.mjs" }
+    { "source": "/api/intent/draft", "destination": "/api/intent/draft.mjs" },
+    { "source": "/api/intent/poll", "destination": "/api/intent/poll.mjs" }
+  ],
+  "crons": [
+    { "path": "/api/intent/poll", "schedule": "* * * * *" }
   ]
 }

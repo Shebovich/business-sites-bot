@@ -35,6 +35,7 @@ import { sendMessage, sendMediaGroup } from './tg-api.mjs';
 import { renderHelp, renderTopicHelp } from './help.mjs';
 import { renderPlaybook } from './playbook.mjs';
 import { parseScoutInput, buildScoutIssue } from './scout-parser.mjs';
+import { intakeAssistantInput, realizeIntent, startIntentEdit, rejectIntent } from './intent.mjs';
 import { InlineKeyboard } from 'grammy';
 // Note: `dispatchWorkflow` kept imported as a dormant fallback (Q18.1).
 // If we revert from Claude Code executor to GH Actions, restore the call in
@@ -2209,6 +2210,51 @@ export async function handleCallback(ctx) {
     return;
   }
 
+  // Intent router callbacks (owner-only): approve/edit/reject classified draft.
+  // See INTENT_ROUTER_PLAN.md Phase C3. uuid encoded в callback_data after `:`.
+  if (data.startsWith('intent_approve:') || data.startsWith('intent_edit:') || data.startsWith('intent_reject:')) {
+    if (ctx.role !== 'owner') {
+      await ctx.reply('Только owner может одобрить заявку.').catch(() => {});
+      return;
+    }
+    const [action, uuid] = data.split(':');
+    if (!uuid) return;
+
+    if (action === 'intent_approve') {
+      const result = await realizeIntent(uuid);
+      const msgBase = ctx.callbackQuery.message?.text || '';
+      if (result.ok) {
+        await ctx.editMessageText(`${msgBase}\n\n✅ Approved → #${result.realized_issue}`).catch(() => {});
+      } else {
+        await ctx.reply(`⚠️ Не смог реализовать: ${result.error}`).catch(() => {});
+      }
+      return;
+    }
+
+    if (action === 'intent_edit') {
+      const result = await startIntentEdit(uuid);
+      if (result.ok) {
+        await ctx.reply(result.question).catch(() => {});
+      } else {
+        await ctx.reply(`⚠️ Edit недоступен: ${result.error}`).catch(() => {});
+      }
+      return;
+    }
+
+    if (action === 'intent_reject') {
+      // For now: reject без custom reason. (Future: setCommandPending для reason wizard.)
+      const result = await rejectIntent(uuid);
+      const msgBase = ctx.callbackQuery.message?.text || '';
+      if (result.ok) {
+        await ctx.editMessageText(`${msgBase}\n\n❌ Rejected`).catch(() => {});
+      } else {
+        await ctx.reply(`⚠️ Reject failed: ${result.error}`).catch(() => {});
+      }
+      return;
+    }
+    return;
+  }
+
   // Per-task prompt mode — assistant enters "task prompt" entry mode.
   // setActiveSection('__task_prompt__') sentinel; handlePhoto/Video/Doc/Text
   // routes to addTaskPrompt вместо persistTgUpload/addNote.
@@ -3004,6 +3050,20 @@ export async function handlePhoto(ctx) {
   const task = await getCurrentTask(ctx.from.id);
   const sectionId = await getActiveSection(ctx.from.id);
   if (!task || !sectionId) {
+    // Intent router intake — photo without active task/section.
+    if (!task) {
+      const sizes = ctx.message.photo;
+      const largest = sizes[sizes.length - 1];
+      const caption = ctx.message.caption || '';
+      const intake = await intakeAssistantInput(ctx, {
+        text: caption,
+        media: { type: 'photo', file_id: largest.file_id, caption },
+      });
+      if (intake.handled) {
+        if (intake.replyText) await ctx.reply(intake.replyText);
+        return;
+      }
+    }
     await ctx.reply('Сначала открой задачу (/current) и выбери секцию.');
     return;
   }
@@ -3052,6 +3112,18 @@ export async function handleVideo(ctx) {
   const task = await getCurrentTask(ctx.from.id);
   const sectionId = await getActiveSection(ctx.from.id);
   if (!task || !sectionId) {
+    // Intent router intake — video without active task/section.
+    if (!task) {
+      const caption = ctx.message.caption || '';
+      const intake = await intakeAssistantInput(ctx, {
+        text: caption,
+        media: { type: 'video', file_id: ctx.message.video.file_id, caption },
+      });
+      if (intake.handled) {
+        if (intake.replyText) await ctx.reply(intake.replyText);
+        return;
+      }
+    }
     await ctx.reply('Сначала открой задачу (/current) и выбери секцию.');
     return;
   }
@@ -3186,10 +3258,27 @@ export async function handleText(ctx) {
     }
   }
 
+  // Intent router clarify-reply (assistant отвечает на CC's clarifying question).
+  // Must run BEFORE task/section checks — sentinel section is hijacking activeSection.
+  const sectionPreCheck = await getActiveSection(ctx.from.id).catch(() => null);
+  if (sectionPreCheck && sectionPreCheck.startsWith('__intent_clarify__:')) {
+    const intake = await intakeAssistantInput(ctx, { text });
+    if (intake.handled) {
+      if (intake.replyText) await ctx.reply(intake.replyText);
+      return;
+    }
+  }
+
   const task = await getCurrentTask(ctx.from.id);
   const sectionId = await getActiveSection(ctx.from.id);
 
   if (!task) {
+    // Intent router intake — assistant free-form, no active task (Q2: current task wins).
+    const intake = await intakeAssistantInput(ctx, { text });
+    if (intake.handled) {
+      if (intake.replyText) await ctx.reply(intake.replyText);
+      return;
+    }
     await ctx.reply('Открой задачу через /list — тогда я сохраню текст как заметку.');
     return;
   }
