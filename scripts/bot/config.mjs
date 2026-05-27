@@ -52,6 +52,14 @@ export const LABELS = {
   PROMPT: 'prompt',
   PROMPT_REJECTED: 'prompt-rejected',
   PROMPT_DONE: 'prompt-done',
+  // INTENT router (assistant free-form UX layer — see INTENT_ROUTER_PLAN.md).
+  // intent-pending  → бот создал issue из free-form ассистент-message, CC классифицирует
+  // intent-drafted  → CC выдал draft, ждёт Pavel approve/edit/reject inline-кнопки
+  // intent-expired  → 24h без action → auto-close + notify assistant
+  // (realized issues наследуют label из draft.target_label — awaiting-scout / bug / prompt / awaiting-claude-process)
+  INTENT_PENDING: 'intent-pending',
+  INTENT_DRAFTED: 'intent-drafted',
+  INTENT_EXPIRED: 'intent-expired',
 };
 
 // Sections a user can submit photos for. Each entry: id, label (RU display),

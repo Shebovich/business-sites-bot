@@ -9,11 +9,15 @@
     },
     "api/task/notify.mjs": {
       "maxDuration": 10
+    },
+    "api/intent/draft.mjs": {
+      "maxDuration": 10
     }
   },
   "rewrites": [
     { "source": "/api/bot/webhook", "destination": "/api/bot/webhook.mjs" },
     { "source": "/api/github-webhook", "destination": "/api/github-webhook.mjs" },
-    { "source": "/api/task/notify", "destination": "/api/task/notify.mjs" }
+    { "source": "/api/task/notify", "destination": "/api/task/notify.mjs" },
+    { "source": "/api/intent/draft", "destination": "/api/intent/draft.mjs" }
   ]
 }

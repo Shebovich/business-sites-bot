@@ -24,6 +24,7 @@ const CC_REQUIRED_LABELS = new Set([
   'design-approved',                // builder Mode skeleton trigger
   'bug',                            // /bug owner-approved → CC fixes
   'prompt',                         // /prompt owner-approved → CC executes
+  LABELS.INTENT_PENDING,            // assistant free-form → CC intent-router agent
 ]);
 
 const TG_OWNER_CHAT_ID = String(getEnv('TG_OWNER_CHAT_ID') || '').trim();

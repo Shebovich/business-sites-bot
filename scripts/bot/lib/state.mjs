@@ -96,6 +96,16 @@ const K = {
   // Set of (owner)+(issue) pairs нотифицированных как «CC offline, awaits» —
   // защита от спама: один push на label change, не повторяем пока CC не вернётся.
   ccOfflineNotified: (ownerChatId, issueNumber) => `cc:offline-notified:${ownerChatId}:${issueNumber}`,
+  // INTENT router (assistant free-form UX, see INTENT_ROUTER_PLAN.md).
+  // assistantIntent (uuid)        → JSON { chat_id, text, media[], started_at, last_touch_at }
+  //                                  Vercel cron сканит — записи с (now-last_touch >10s) → create GH issue
+  // intentDebounceByChat (chatId) → uuid строка, защита от race при первом message + быстрый lookup open intent
+  // intentDraft (uuid)            → JSON draft from CC intent-router agent, TTL 24h (auto-expire)
+  // intentUuidByIssue (issueN)    → uuid строка, reverse lookup для callback handlers
+  assistantIntent:    (uuid) => `assistant-intent:${uuid}`,
+  intentDebounceByChat: (chatId) => `intent-debounce:${chatId}`,
+  intentDraft:        (uuid) => `intent-draft:${uuid}`,
+  intentUuidByIssue:  (issueNumber) => `intent-uuid:${issueNumber}`,
 };
 
 // ---- CC session liveness (W2) --------------------------------------------
@@ -785,4 +795,160 @@ export async function listAssignedTasks() {
     }
   } while (cursor !== 0);
   return [...numbers];
+}
+
+// ---- INTENT router (assistant free-form UX layer) -----------------------
+// See INTENT_ROUTER_PLAN.md. Mirror of bugSession/promptSession pattern,
+// плюс reverse uuid<->issue mapping и list-expired для Vercel cron.
+
+const INTENT_TTL = 30 * 60;             // 30 min — abandoned intents roll off
+const INTENT_DEBOUNCE_TTL = 5 * 60;     // 5 min — long enough для cron grab, short enough чтобы stale debounce keys не висели
+const INTENT_DRAFT_TTL = 24 * 60 * 60;  // 24h auto-expire (Q6 locked)
+const INTENT_ISSUE_MAP_TTL = 7 * 24 * 60 * 60;  // 7d — issue→uuid reverse lookup, expires после очевидного abandon
+
+// Start a new intent OR append to existing one for this chat (debounce-aware).
+// Returns the uuid (existing or newly created).
+export async function startOrAppendIntent(chatId, { text = '', media = null } = {}) {
+  const r = getRedis();
+  const existingUuid = await r.get(K.intentDebounceByChat(chatId));
+  if (existingUuid) {
+    if (text) await appendIntentText(existingUuid, text);
+    if (media) await appendIntentMedia(existingUuid, media);
+    // bump debounce TTL so cron не дёрнет посередине input'a
+    await r.set(K.intentDebounceByChat(chatId), existingUuid, { ex: INTENT_DEBOUNCE_TTL });
+    return existingUuid;
+  }
+  // Create new
+  const uuid = newIntentUuid();
+  const now = new Date().toISOString();
+  const payload = {
+    uuid,
+    chat_id: String(chatId),
+    text: String(text || '').slice(0, 8000),
+    media: media ? [normalizeMedia(media)] : [],
+    started_at: now,
+    last_touch_at: now,
+  };
+  await r.set(K.assistantIntent(uuid), JSON.stringify(payload), { ex: INTENT_TTL });
+  await r.set(K.intentDebounceByChat(chatId), uuid, { ex: INTENT_DEBOUNCE_TTL });
+  return uuid;
+}
+
+export async function appendIntentText(uuid, text) {
+  const intent = await getIntent(uuid);
+  if (!intent) return false;
+  const sep = intent.text ? '\n\n' : '';
+  intent.text = (intent.text + sep + String(text || '')).slice(0, 16000);
+  intent.last_touch_at = new Date().toISOString();
+  await getRedis().set(K.assistantIntent(uuid), JSON.stringify(intent), { ex: INTENT_TTL });
+  return true;
+}
+
+export async function appendIntentMedia(uuid, media) {
+  const intent = await getIntent(uuid);
+  if (!intent) return false;
+  intent.media = intent.media || [];
+  if (intent.media.length >= 10) return false;
+  intent.media.push(normalizeMedia(media));
+  // Auto-merge caption to text (same as bugSession behaviour)
+  const caption = (media.caption || '').trim();
+  if (caption) {
+    const sep = intent.text ? '\n\n' : '';
+    intent.text = (intent.text + sep + caption).slice(0, 16000);
+  }
+  intent.last_touch_at = new Date().toISOString();
+  await getRedis().set(K.assistantIntent(uuid), JSON.stringify(intent), { ex: INTENT_TTL });
+  return true;
+}
+
+export async function getIntent(uuid) {
+  const raw = await getRedis().get(K.assistantIntent(uuid));
+  if (!raw) return null;
+  try { return typeof raw === 'string' ? JSON.parse(raw) : raw; }
+  catch { return null; }
+}
+
+export async function clearIntent(uuid) {
+  const intent = await getIntent(uuid);
+  await getRedis().del(K.assistantIntent(uuid));
+  if (intent && intent.chat_id) {
+    // Only clear debounce if it still points to THIS uuid (assistant might have started a new one)
+    const current = await getRedis().get(K.intentDebounceByChat(intent.chat_id));
+    if (current === uuid) await getRedis().del(K.intentDebounceByChat(intent.chat_id));
+  }
+}
+
+// Returns open uuid for chat (or null) — used by handleText to decide append vs new.
+export async function getOpenIntentForChat(chatId) {
+  return await getRedis().get(K.intentDebounceByChat(chatId));
+}
+
+// Vercel cron sweeper — returns intents quiet for >= idleSeconds.
+// Default 30s: debounce window assistant's multi-message burst before issue creation.
+export async function listIdleIntents({ idleSeconds = 30 } = {}) {
+  const r = getRedis();
+  let cursor = 0;
+  const out = [];
+  const cutoff = Date.now() - idleSeconds * 1000;
+  do {
+    const [next, batch] = await r.scan(cursor, { match: 'assistant-intent:*', count: 100 });
+    cursor = Number(next);
+    for (const k of batch) {
+      const raw = await r.get(k);
+      if (!raw) continue;
+      let intent;
+      try { intent = typeof raw === 'string' ? JSON.parse(raw) : raw; }
+      catch { continue; }
+      const touchedMs = Date.parse(intent.last_touch_at || intent.started_at || 0);
+      if (touchedMs && touchedMs <= cutoff) out.push(intent);
+    }
+  } while (cursor !== 0);
+  return out;
+}
+
+// ---- Intent draft (CC → bot) --------------------------------------------
+
+export async function setIntentDraft(uuid, draft) {
+  await getRedis().set(K.intentDraft(uuid), JSON.stringify({
+    ...draft,
+    drafted_at: new Date().toISOString(),
+  }), { ex: INTENT_DRAFT_TTL });
+}
+
+export async function getIntentDraft(uuid) {
+  const raw = await getRedis().get(K.intentDraft(uuid));
+  if (!raw) return null;
+  try { return typeof raw === 'string' ? JSON.parse(raw) : raw; }
+  catch { return null; }
+}
+
+export async function clearIntentDraft(uuid) {
+  await getRedis().del(K.intentDraft(uuid));
+}
+
+// Reverse lookup uuid ↔ issue (callback handlers receive issue from button, need uuid).
+export async function mapIntentIssueToUuid(issueNumber, uuid) {
+  await getRedis().set(K.intentUuidByIssue(issueNumber), uuid, { ex: INTENT_ISSUE_MAP_TTL });
+}
+
+export async function getIntentUuidByIssue(issueNumber) {
+  return await getRedis().get(K.intentUuidByIssue(issueNumber));
+}
+
+// ---- helpers ------------------------------------------------------------
+
+function newIntentUuid() {
+  // 12 hex chars — collisions practically impossible at our scale and
+  // short enough to fit in TG callback_data (64-byte limit).
+  return Array.from({ length: 12 }, () => Math.floor(Math.random() * 16).toString(16)).join('');
+}
+
+function normalizeMedia(m) {
+  return {
+    type: m.type,                   // 'photo' | 'video' | 'document'
+    file_id: m.file_id,
+    file_name: m.file_name || null,
+    mime_type: m.mime_type || null,
+    caption: (m.caption || '').trim(),
+  };
 }
