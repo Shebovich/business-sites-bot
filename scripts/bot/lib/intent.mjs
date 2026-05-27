@@ -266,10 +266,24 @@ export async function realizeIntent(uuid) {
   if (!intentIssue) return { ok: false, error: 'intent issue not resolved' };
 
   const realized = await createRealizedIssue(draft, intentIssue);
+
+  // Set assistant_chat_id для realized issue → bot-notify automatically targets
+  // initiator first (per locked feedback_progress_to_initiator 2026-05-27 #80).
+  // From_chat parsed from intent issue body metadata.
+  const fromChatMatch = (intentIssue.body || '').match(/^from_chat:\s*(\d+)/m);
+  if (fromChatMatch && fromChatMatch[1] !== '0') {
+    try {
+      const { setAssistantChatId } = await import('./state.mjs');
+      await setAssistantChatId(realized.number, fromChatMatch[1]);
+    } catch (e) {
+      console.warn(`[intent uuid=${uuid}] setAssistantChatId failed:`, e.message);
+    }
+  }
+
   await closeIntentIssueAfterRealize(intentIssue, realized.number);
   await clearIntentDraft(uuid);
 
-  console.log(`[intent uuid=${uuid} stage=realized realized_issue=${realized.number}]`);
+  console.log(`[intent uuid=${uuid} stage=realized realized_issue=${realized.number} initiator=${fromChatMatch?.[1] || 'none'}]`);
   return { ok: true, realized_issue: realized.number, title: realized.title };
 }
 
