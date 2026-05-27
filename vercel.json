@@ -19,10 +19,10 @@
     "api/relay/send.mjs": {
       "maxDuration": 10
     },
-    "api/interview/start.mjs": {
+    "api/interview/index.mjs": {
       "maxDuration": 10
     },
-    "api/interview/result.mjs": {
+    "api/claude/qna.mjs": {
       "maxDuration": 10
     }
   },
@@ -33,7 +33,9 @@
     { "source": "/api/intent/draft", "destination": "/api/intent/draft.mjs" },
     { "source": "/api/intent/poll", "destination": "/api/intent/poll.mjs" },
     { "source": "/api/relay/send", "destination": "/api/relay/send.mjs" },
-    { "source": "/api/interview/start", "destination": "/api/interview/start.mjs" },
-    { "source": "/api/interview/result", "destination": "/api/interview/result.mjs" }
+    { "source": "/api/interview/start", "destination": "/api/interview/index.mjs" },
+    { "source": "/api/interview/result", "destination": "/api/interview/index.mjs" },
+    { "source": "/api/claude/question", "destination": "/api/claude/qna.mjs" },
+    { "source": "/api/claude/answer", "destination": "/api/claude/qna.mjs" }
   ]
 }
