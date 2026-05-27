@@ -3383,12 +3383,33 @@ export async function handleText(ctx) {
   const sectionId = await getActiveSection(ctx.from.id);
 
   if (!task) {
-    // Intent router intake — assistant free-form, no active task (Q2: current task wins).
+    // Owner path: free-form text → direct prompt issue для CC reply
+    // (симметрия с handleVoice owner path). Pavel feedback 2026-05-27:
+    // больше никакого «открой задачу /list» legacy.
+    if (ctx.role === 'owner') {
+      const preview = text.length > 60 ? text.slice(0, 60) : text;
+      try {
+        const { createIssue } = await import('./github-api.mjs');
+        const issue = await createIssue({
+          title: `[owner-text] ${preview}`,
+          body: `<!-- owner-text-v1 -->\nfrom_chat: ${ctx.from.id}\n<!-- /owner-text-v1 -->\n\n## Text\n\n${text}\n\n---\n\nCC reactive: read → execute → relay reply back to owner via /api/relay/send.`,
+          labels: ['prompt'],
+        });
+        console.log(`[owner-text issue=${issue.number}]`);
+      } catch (e) {
+        console.error('[owner-text] createIssue failed:', e.message);
+        await ctx.reply(`⚠️ Не смог создать задачу: ${e.message}`);
+      }
+      return;
+    }
+
+    // Assistant path: intent router intake (Q2 locked: current task wins → only fires в idle).
     const intake = await intakeAssistantInput(ctx, { text });
     if (intake.handled) {
       if (intake.replyText) await ctx.reply(intake.replyText);
       return;
     }
+    // Assistant in idle but intent router disabled — old fallback.
     await ctx.reply('Открой задачу через /list — тогда я сохраню текст как заметку.');
     return;
   }
