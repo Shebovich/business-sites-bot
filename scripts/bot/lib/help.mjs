@@ -5,6 +5,28 @@
 // Each entry: title line + что делает + примеры (если есть) + когда юзать.
 // Examples wrapped in <code>...</code> so user can long-press to copy.
 export const HELP_TEXTS = {
+  // ============ INTENT ROUTER (assistant free-form UX, INTENT_ROUTER_ENABLED) ============
+  intent: `<b>Свободный ввод</b> (для ассистентов)
+
+Если ты ассистент и НЕ в active task — просто пиши боту что хочешь. Я разберусь и отправлю Pavel'у на одобрение.
+
+<i>Сценарии:</i>
+• <b>Новое заведение</b>: «Нашёл бар Зыбкое на Победителях, сайта нет» (или просто ссылка 2GIS / IG handle)
+• <b>Баг</b>: «На сайте Лес меню не открывается на мобиле» + screenshot
+• <b>Идея/задача</b>: «Сделай чтобы tester проверял contrast ratio»
+• <b>Правка секции</b>: «Лес, hero — поменяй tagline на 'Кофе в лесу'»
+• <b>Загрузка фото</b>: «Лес, интерьер — вот 3 фото» + файлы
+
+<i>Что происходит:</i>
+1. Я принимаю text/фото (если фото без подписи — спрошу слаг)
+2. Через ~60 сек создаётся issue → Claude Code классифицирует
+3. Pavel получает draft с кнопками [✅] [✏️ Правка] [❌]
+4. После approve — реальная задача в pipeline
+
+<i>Если я не понял:</i> я задам уточняющий вопрос, просто ответь свободным текстом.
+
+Slash-команды (<code>/scout</code>, <code>/bug</code>, <code>/prompt</code>) тоже работают если хочется напрямую без routing.`,
+
   // ============ ОБЩИЕ ============
   start: `<b>/start</b> — приветствие + счётчик активных задач.
 
@@ -354,10 +376,21 @@ const ASSISTANT_OVERVIEW = `📋 <b>Сбор контента</b>
 
 <b>Как собирать фото:</b> /current → тапни секцию → шли IG-ссылку, фото, видео, или прямой URL. Подробнее: /playbook.`;
 
+const INTENT_INTRO = `✨ <b>Новое: просто пиши что хочешь</b>
+Не помнишь команды? Шли свободный текст / фото / видео — я разберусь и спрошу Pavel'a.
+• «Нашёл бар Зыбкое на Победителях» → scout заявка
+• «На сайте Лес меню не открывается» → bug
+• «Лес, hero — вот видео» (+ файл) → правка секции
+Pavel получит draft с кнопками [OK] [Правка] [Reject]. Слэш-команды ниже тоже работают.
+
+`;
+
 export function renderHelp(role) {
   const header = '🤖 <b>Shebovich Sites Bot</b>\n';
   if (role === 'owner') return header + '\n' + OWNER_OVERVIEW;
-  return header + '\n' + ASSISTANT_OVERVIEW;
+  const intentEnabled = (process.env.INTENT_ROUTER_ENABLED || '').trim() === 'true';
+  const intro = intentEnabled ? INTENT_INTRO : '';
+  return header + '\n' + intro + ASSISTANT_OVERVIEW;
 }
 
 // `topic` is a slash-stripped command name. Returns the detailed text or
