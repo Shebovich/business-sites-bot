@@ -59,10 +59,11 @@ export async function transcribeTgVoice(fileId, { hintLanguage = 'ru' } = {}) {
     },
   };
 
+  console.log(`[voice-transcribe] start — ${keys.length} keys available, audio size ${buf.length}b`);
   let lastError;
   for (let i = 0; i < keys.length; i++) {
     const key = keys[i];
-    const keyTag = `key#${i + 1}/${keys.length}`;
+    const keyTag = `key#${i + 1}/${keys.length}(${key.slice(0, 8)}...)`;
     try {
       const geminiResp = await fetch(
         `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${key}`,
