@@ -33,7 +33,7 @@ export default async function handler(req, res) {
   }
 
   try {
-    const results = await runCronPoll({ idleSeconds: 30 });
+    const results = await runCronPoll({ idleSeconds: 10 });
     const ok = results.filter(r => r.ok).length;
     const failed = results.length - ok;
     res.status(200).json({
