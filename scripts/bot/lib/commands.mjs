@@ -37,6 +37,7 @@ import { renderPlaybook } from './playbook.mjs';
 import { parseScoutInput, buildScoutIssue } from './scout-parser.mjs';
 import { intakeAssistantInput, realizeIntent, startIntentEdit, rejectIntent } from './intent.mjs';
 import { transcribeTgVoice } from './voice-transcribe.mjs';
+import { getInterviewWaitingForChat, captureInterviewAnswer, getInterviewSession, cancelInterview } from './state.mjs';
 import { InlineKeyboard } from 'grammy';
 // Note: `dispatchWorkflow` kept imported as a dormant fallback (Q18.1).
 // If we revert from Claude Code executor to GH Actions, restore the call in
@@ -3299,6 +3300,42 @@ export async function handleText(ctx) {
     }
   }
 
+  // Interview answer priority — если chat сейчас отвечает на интервью, любой
+  // free-form текст идёт в текущий вопрос. /cancel_interview прерывает.
+  const waitingSessionId = await getInterviewWaitingForChat(ctx.from.id).catch(() => null);
+  if (waitingSessionId) {
+    if (text === '/cancel_interview' || text === '/cancel') {
+      await cancelInterview(waitingSessionId);
+      await ctx.reply('❌ Интервью отменено.');
+      return;
+    }
+    const session = await getInterviewSession(waitingSessionId);
+    if (!session) {
+      // Session expired during answer.
+      await ctx.reply('⌛ Сессия интервью истекла. Попроси Pavel\'а перезапустить.');
+      return;
+    }
+    const result = await captureInterviewAnswer(waitingSessionId, text);
+    if (!result) {
+      await ctx.reply('⚠️ Не смог записать ответ. Попробуй ещё раз.');
+      return;
+    }
+    if (result.completed) {
+      await ctx.reply('✅ Все вопросы есть, спасибо! Передаю Claude Code для дальнейшей работы.');
+    } else {
+      const idx = session.current_index;  // already advanced
+      const total = session.questions.length;
+      const lines = [
+        `📝 (${idx + 1} из ${total})`,
+        '',
+        `<b>${esc(result.next_question.prompt)}</b>`,
+      ];
+      if (result.next_question.hint) lines.push('', `<i>${esc(result.next_question.hint)}</i>`);
+      await ctx.reply(lines.join('\n'), { parse_mode: 'HTML' });
+    }
+    return;
+  }
+
   // /bug session priority — appending text to bug draft instead of normal routing.
   const bugSession = await getBugSession(ctx.from.id).catch(() => null);
   if (bugSession) {
@@ -3424,6 +3461,10 @@ function truncatePreview(s, limit = 100) {
   if (!s) return '';
   if (s.length <= limit) return s;
   return s.slice(0, limit) + '…';
+}
+
+function esc(s) {
+  return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
 // ---- Safety wrappers ----------------------------------------------------

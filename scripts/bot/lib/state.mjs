@@ -96,6 +96,13 @@ const K = {
   // Set of (owner)+(issue) pairs нотифицированных как «CC offline, awaits» —
   // защита от спама: один push на label change, не повторяем пока CC не вернётся.
   ccOfflineNotified: (ownerChatId, issueNumber) => `cc:offline-notified:${ownerChatId}:${issueNumber}`,
+  // INTERVIEW (CC-driven QnA over TG, see INTERVIEW.md).
+  // session  → JSON { questions[], current_index, target_chat, started_at }
+  // answers  → JSON { responses {key:value}, started_at, completed_at|null }
+  // waiting  → sessionId, reverse lookup для handleText branch (TTL = session TTL)
+  interviewSession: (sessionId) => `interview:session:${sessionId}`,
+  interviewAnswers: (sessionId) => `interview:answers:${sessionId}`,
+  interviewWaiting: (chatId) => `interview:waiting:${chatId}`,
   // INTENT router (assistant free-form UX, see INTENT_ROUTER_PLAN.md).
   // assistantIntent (uuid)        → JSON { chat_id, text, media[], started_at, last_touch_at }
   //                                  Vercel cron сканит — записи с (now-last_touch >10s) → create GH issue
@@ -795,6 +802,86 @@ export async function listAssignedTasks() {
     }
   } while (cursor !== 0);
   return [...numbers];
+}
+
+// ---- INTERVIEW (CC ↔ TG QnA) --------------------------------------------
+
+const INTERVIEW_TTL = 30 * 60; // 30 min — session expires
+
+export async function startInterviewSession(sessionId, { questions, targetChatId }) {
+  const session = {
+    questions,                  // [{key, prompt, hint?}]
+    current_index: 0,
+    target_chat: String(targetChatId),
+    started_at: new Date().toISOString(),
+  };
+  const answers = {
+    responses: {},
+    started_at: session.started_at,
+    completed_at: null,
+  };
+  const r = getRedis();
+  await Promise.all([
+    r.set(K.interviewSession(sessionId), JSON.stringify(session), { ex: INTERVIEW_TTL }),
+    r.set(K.interviewAnswers(sessionId), JSON.stringify(answers), { ex: INTERVIEW_TTL }),
+    r.set(K.interviewWaiting(targetChatId), sessionId, { ex: INTERVIEW_TTL }),
+  ]);
+  return session;
+}
+
+export async function getInterviewSession(sessionId) {
+  const raw = await getRedis().get(K.interviewSession(sessionId));
+  if (!raw) return null;
+  try { return typeof raw === 'string' ? JSON.parse(raw) : raw; }
+  catch { return null; }
+}
+
+export async function getInterviewAnswers(sessionId) {
+  const raw = await getRedis().get(K.interviewAnswers(sessionId));
+  if (!raw) return null;
+  try { return typeof raw === 'string' ? JSON.parse(raw) : raw; }
+  catch { return null; }
+}
+
+// Returns sessionId for chat if waiting, else null.
+export async function getInterviewWaitingForChat(chatId) {
+  return await getRedis().get(K.interviewWaiting(chatId));
+}
+
+// Append answer to current question, advance index, mark completed if done.
+// Returns { question_key, completed: bool, next_question: {...} | null }.
+export async function captureInterviewAnswer(sessionId, answerText) {
+  const session = await getInterviewSession(sessionId);
+  const answers = await getInterviewAnswers(sessionId);
+  if (!session || !answers) return null;
+  const q = session.questions[session.current_index];
+  if (!q) return null;
+  answers.responses[q.key] = String(answerText).slice(0, 4000);
+  session.current_index += 1;
+  const completed = session.current_index >= session.questions.length;
+  if (completed) {
+    answers.completed_at = new Date().toISOString();
+    // Clear waiting key so chat returns to normal handlers.
+    await getRedis().del(K.interviewWaiting(session.target_chat));
+  }
+  const r = getRedis();
+  await Promise.all([
+    r.set(K.interviewSession(sessionId), JSON.stringify(session), { ex: INTERVIEW_TTL }),
+    r.set(K.interviewAnswers(sessionId), JSON.stringify(answers), { ex: INTERVIEW_TTL }),
+  ]);
+  return {
+    question_key: q.key,
+    completed,
+    next_question: completed ? null : session.questions[session.current_index],
+  };
+}
+
+export async function cancelInterview(sessionId) {
+  const session = await getInterviewSession(sessionId);
+  const r = getRedis();
+  await r.del(K.interviewSession(sessionId));
+  await r.del(K.interviewAnswers(sessionId));
+  if (session) await r.del(K.interviewWaiting(session.target_chat));
 }
 
 // ---- INTENT router (assistant free-form UX layer) -----------------------
