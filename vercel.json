@@ -23,8 +23,5 @@
     { "source": "/api/task/notify", "destination": "/api/task/notify.mjs" },
     { "source": "/api/intent/draft", "destination": "/api/intent/draft.mjs" },
     { "source": "/api/intent/poll", "destination": "/api/intent/poll.mjs" }
-  ],
-  "crons": [
-    { "path": "/api/intent/poll", "schedule": "* * * * *" }
   ]
 }
