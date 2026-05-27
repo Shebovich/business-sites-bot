@@ -158,17 +158,29 @@ async function handleClarification({ res, intent_issue, uuid, draft }) {
     return;
   }
 
-  // Read intent to find assistant chat_id.
+  // Try Redis first; fallback к GH issue body if expired (TTL 30min vs slow CC).
+  let targetChat = null;
   const intent = await getIntent(uuid);
-  if (!intent || !intent.chat_id) {
-    res.status(404).json({ ok: false, error: 'intent payload not found in Redis (TTL expired?)' });
+  if (intent?.chat_id) {
+    targetChat = intent.chat_id;
+  } else {
+    // Parse from_chat from issue body (set by materializeIntent при create).
+    try {
+      const { getIssue } = await import('../../scripts/bot/lib/github-api.mjs');
+      const issue = await getIssue(intent_issue);
+      const m = (issue?.body || '').match(/^from_chat:\s*(\d+)/m);
+      if (m && m[1] !== '0') targetChat = m[1];
+    } catch (e) {
+      console.warn('[intent/draft clarify] body fallback failed:', e.message);
+    }
+  }
+  if (!targetChat) {
+    res.status(404).json({ ok: false, error: 'cannot resolve target chat (Redis expired + issue body missing from_chat)' });
     return;
   }
 
   // Persist clarify mode (next text from this chat appends to same intent).
-  // Use existing activeSection slot — handleText will detect '__intent_clarify__:'
-  // prefix and route accordingly (Phase C wiring).
-  await setActiveSection(intent.chat_id, `__intent_clarify__:${uuid}`);
+  await setActiveSection(targetChat, `__intent_clarify__:${uuid}`);
 
   const lines = [
     `❓ <b>Уточнение по твоей заявке</b> (#${intent_issue})`,
@@ -178,7 +190,7 @@ async function handleClarification({ res, intent_issue, uuid, draft }) {
 
   try {
     await tgApi('sendMessage', {
-      chat_id: intent.chat_id,
+      chat_id: targetChat,
       text: lines.join('\n'),
       parse_mode: 'HTML',
     });
@@ -186,7 +198,7 @@ async function handleClarification({ res, intent_issue, uuid, draft }) {
     console.warn('[intent/draft] TG send to assistant failed:', e.message);
   }
 
-  res.status(200).json({ ok: true, mode: 'clarification', sent_to: intent.chat_id });
+  res.status(200).json({ ok: true, mode: 'clarification', sent_to: targetChat });
 }
 
 function esc(s) {
