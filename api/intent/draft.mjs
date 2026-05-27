@@ -121,19 +121,35 @@ async function handleNormalDraft({ res, intent_issue, uuid, draft }) {
   if (draft.target_section) lines.push(`<b>Секция:</b> ${esc(draft.target_section)}`);
   lines.push('', esc(draft.summary), '', `<i>${esc(draft.proposed_action)}</i>`);
 
+  // Voice-aware send: если у intent был голосовое сообщение → forward оригинал
+  // c caption (Pavel слышит ассистента + видит draft + кнопки). Caption max
+  // 1024 chars (TG limit), мы укладываемся (~250 char).
+  const voiceFileId = draft?.raw_payload?.voice_file_id;
+  const caption = lines.join('\n');
+
   try {
-    await tgApi('sendMessage', {
-      chat_id: OWNER_ID,
-      text: lines.join('\n'),
-      parse_mode: 'HTML',
-      reply_markup: { inline_keyboard },
-    });
+    if (voiceFileId) {
+      await tgApi('sendVoice', {
+        chat_id: OWNER_ID,
+        voice: voiceFileId,
+        caption: caption.length > 1024 ? caption.slice(0, 1020) + '…' : caption,
+        parse_mode: 'HTML',
+        reply_markup: { inline_keyboard },
+      });
+    } else {
+      await tgApi('sendMessage', {
+        chat_id: OWNER_ID,
+        text: caption,
+        parse_mode: 'HTML',
+        reply_markup: { inline_keyboard },
+      });
+    }
   } catch (e) {
     console.warn('[intent/draft] TG send to owner failed:', e.message);
     // Не валим — draft persisted, Pavel может посмотреть в issue
   }
 
-  res.status(200).json({ ok: true, mode: 'draft', sent_to: OWNER_ID });
+  res.status(200).json({ ok: true, mode: 'draft', sent_to: OWNER_ID, voice_forwarded: !!voiceFileId });
 }
 
 async function handleClarification({ res, intent_issue, uuid, draft }) {

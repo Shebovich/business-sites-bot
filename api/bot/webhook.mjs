@@ -14,7 +14,7 @@ import {
   handleBlock, handleUnblock, handleAbandon, handleReassign,
   handleBug, handleDone, handleBugReview,
   handlePrompt, handlePromptReview,
-  handleCallback, handlePhoto, handleVideo, handleDocument, handleText,
+  handleCallback, handlePhoto, handleVideo, handleVoice, handleDocument, handleText,
 } from '../../scripts/bot/lib/commands.mjs';
 import { assertEnv, getEnv } from '../../scripts/bot/config.mjs';
 import { getRoleOverride, isApprovedAssistant,
@@ -322,6 +322,7 @@ function getBot() {
   bot.on('callback_query',   handleCallback);
   bot.on('message:photo',    handlePhoto);
   bot.on('message:video',    handleVideo);
+  bot.on('message:voice',    handleVoice);
   bot.on('message:document', handleDocument);
   bot.on('message:text',     handleText);
 

@@ -36,6 +36,7 @@ import { renderHelp, renderTopicHelp } from './help.mjs';
 import { renderPlaybook } from './playbook.mjs';
 import { parseScoutInput, buildScoutIssue } from './scout-parser.mjs';
 import { intakeAssistantInput, realizeIntent, startIntentEdit, rejectIntent } from './intent.mjs';
+import { transcribeTgVoice } from './voice-transcribe.mjs';
 import { InlineKeyboard } from 'grammy';
 // Note: `dispatchWorkflow` kept imported as a dormant fallback (Q18.1).
 // If we revert from Claude Code executor to GH Actions, restore the call in
@@ -3144,6 +3145,52 @@ export async function handleVideo(ctx) {
     caption,
   });
   await ctx.reply(`🎬 Видео добавлено в секцию ${sectionId}.`);
+}
+
+// Voice messages — поддерживается только в intent router (idle assistant).
+// Транскрибируется через Gemini → text идёт в intent.text, file_id в media[]
+// чтобы Pavel получил forward оригинала + caption с summary.
+export async function handleVoice(ctx) {
+  const fileId = ctx.message.voice?.file_id;
+  if (!fileId) return;
+
+  // Скип если /bug или /prompt session active (для них voice пока не supported).
+  const bugSess = await getBugSession(ctx.from.id).catch(() => null);
+  const promptSess = bugSess ? null : await getPromptSession(ctx.from.id).catch(() => null);
+  if (bugSess || promptSess) {
+    await ctx.reply('🎤 Голосовые пока работают только в свободном режиме (вне /bug и /prompt). Напиши текстом или скинь файлом.');
+    return;
+  }
+
+  // Active task → voice игнорируем (current task wins, но photo upload не от голосовых).
+  const task = await getCurrentTask(ctx.from.id);
+  if (task) {
+    await ctx.reply('🎤 Голосовые в активной задаче не обрабатываются. Закрой задачу (/cancel) или используй текст.');
+    return;
+  }
+
+  // Transcribe (Gemini, ~2-5s).
+  let transcript;
+  await ctx.reply('🎤 Расшифровываю...');
+  try {
+    transcript = await transcribeTgVoice(fileId);
+  } catch (e) {
+    console.error('[voice] transcribe failed:', e.message);
+    await ctx.reply('🎤 Не удалось расшифровать голосовое. Напиши текстом?');
+    return;
+  }
+
+  // Intake — text = transcript, media[voice file_id], caption = ''.
+  const intake = await intakeAssistantInput(ctx, {
+    text: transcript,
+    media: { type: 'voice', file_id: fileId, caption: '' },
+  });
+  if (intake.handled) {
+    const preview = transcript.length > 120 ? transcript.slice(0, 120) + '…' : transcript;
+    const replyParts = [`🎤 Расшифровка: «${preview}»`];
+    if (intake.replyText) replyParts.push('', intake.replyText);
+    await ctx.reply(replyParts.join('\n'));
+  }
 }
 
 // Documents (PDFs, .md, любые file uploads) идут в /bug или /prompt session
