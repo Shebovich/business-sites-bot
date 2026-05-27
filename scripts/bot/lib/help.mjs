@@ -348,49 +348,34 @@ const OWNER_OVERVIEW = `📋 <b>Активные задачи</b>
 💡 <b>Детали с примерами:</b>
 <code>/help submit</code>, <code>/help scout</code>, <code>/help sold</code> и т.д. — по любой команде из списка выше.`;
 
-const ASSISTANT_OVERVIEW = `📋 <b>Сбор контента</b>
-/list — task'и в работе
-/current — открыть, фото-секции
-/preview — что сейчас собрано
-/skip {section} • /unskip {section}
-/rm {section} {N} — удалить фото
+const ASSISTANT_OVERVIEW = `<b>Основной режим — просто пиши</b>
+Не помнишь команды? Шли свободный текст / фото / видео — я разберусь и спрошу Pavel'a одобрить (через ~60 сек).
 
-📝 <b>Заметки и инструкции</b>
-Просто пиши текст — сохраняется как заметка
-/note {текст} — явный вариант
-/notes — список • /rm_note {N} • /clear_notes
+<i>Примеры:</i>
+• «Нашёл бар X на улице Y, сайта нет» → scout
+• «На сайте Лес меню не открывается на мобиле» → bug
+• «Лес, hero — поменяй tagline на 'Кофе в лесу'» → правка
+• «Лес интерьер — вот 3 фото» (+ файлы) → photo
 
-📤 <b>Передача owner'у</b>
-/submit — передать на ревью
+Детали: <code>/help intent</code>
 
-🔍 <b>Лиды</b> (опционально)
-/scout {input} — предложить заведение
+📋 <b>Работа над активной задачей</b>
+/list — список задач
+/current — открыть текущую
+/submit — передать owner'у
 
 ⚙️ <b>Утилиты</b>
 /cancel — сбросить сессию
 /whoami — моя роль + id
 /playbook — типовые сценарии
 
-💡 <b>Детали с примерами:</b>
-<code>/help submit</code>, <code>/help current</code>, <code>/help rm</code> и т.д. — по любой команде из списка выше.
-
-<b>Как собирать фото:</b> /current → тапни секцию → шли IG-ссылку, фото, видео, или прямой URL. Подробнее: /playbook.`;
-
-const INTENT_INTRO = `✨ <b>Новое: просто пиши что хочешь</b>
-Не помнишь команды? Шли свободный текст / фото / видео — я разберусь и спрошу Pavel'a.
-• «Нашёл бар Зыбкое на Победителях» → scout заявка
-• «На сайте Лес меню не открывается» → bug
-• «Лес, hero — вот видео» (+ файл) → правка секции
-Pavel получит draft с кнопками [OK] [Правка] [Reject]. Слэш-команды ниже тоже работают.
-
-`;
+💡 <b>Расширенные команды</b> (для power-user)
+<code>/help current</code> · <code>/help submit</code> · <code>/help skip</code> · <code>/help rm</code> · <code>/help note</code> — детали по любой команде, включая редкие (skip, unskip, rm, note, notes, rm_note, clear_notes, preview).`;
 
 export function renderHelp(role) {
   const header = '🤖 <b>Shebovich Sites Bot</b>\n';
   if (role === 'owner') return header + '\n' + OWNER_OVERVIEW;
-  const intentEnabled = (process.env.INTENT_ROUTER_ENABLED || '').trim() === 'true';
-  const intro = intentEnabled ? INTENT_INTRO : '';
-  return header + '\n' + intro + ASSISTANT_OVERVIEW;
+  return header + '\n' + ASSISTANT_OVERVIEW;
 }
 
 // `topic` is a slash-stripped command name. Returns the detailed text or
