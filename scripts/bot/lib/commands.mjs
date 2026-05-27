@@ -3169,9 +3169,11 @@ export async function handleVoice(ctx) {
     return;
   }
 
-  // Transcribe (Gemini, ~2-5s).
+  // Transcribe (Gemini, ~2-5s). Owner — no preview spam (Pavel feedback
+  // 2026-05-27 #65), assistant видит preview для confirmation что бот понял.
   let transcript;
-  await ctx.reply('🎤 Расшифровываю...');
+  const isOwner = ctx.role === 'owner';
+  if (!isOwner) await ctx.reply('🎤 Расшифровываю...');
   try {
     transcript = await transcribeTgVoice(fileId);
   } catch (e) {
@@ -3182,12 +3184,11 @@ export async function handleVoice(ctx) {
 
   const preview = transcript.length > 200 ? transcript.slice(0, 200) + '…' : transcript;
 
-  // Owner path: voice не идёт в intent router (тот предназначен для
-  // assistant→owner approve). Owner шлёт voice как direct conversation
-  // c CC. Создаём prompt issue сразу с label `prompt` — CC reactive
-  // подхватит и ответит через relay endpoint.
-  if (ctx.role === 'owner') {
-    await ctx.reply(`🎤 Расшифровка: «${preview}»\n\n⏳ Передаю Claude Code, ответ придёт сюда же.`);
+  // Owner path: voice не идёт в intent router. Создаём prompt issue
+  // напрямую → CC reactive подхватит и ответит через relay endpoint.
+  // NO «Расшифровываю...» NO «Расшифровка: ...» — Pavel feedback: молча
+  // принять и handoff к CC; final ответ придёт через relay.
+  if (isOwner) {
     try {
       const { createIssue } = await import('./github-api.mjs');
       const issue = await createIssue({
