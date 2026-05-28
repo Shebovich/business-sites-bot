@@ -360,18 +360,32 @@ async function createRealizedIssue(draft, intentIssue) {
     case 'edit-section':
     case 'photo-upload': {
       title = `[${intent}] ${slug} → ${target_section} · ${truncate(summary, 40)}`;
+      // Per-section sources block — IG/direct URLs assistant mapped к секциям.
+      // Без этого CC теряет URLs (bug 2026-05-28 #93). Сохраняем raw_payload.sections.
+      let sectionsBlock = '';
+      if (raw_payload?.sections && typeof raw_payload.sections === 'object') {
+        const lines = ['', '## Section sources', ''];
+        for (const [sec, urls] of Object.entries(raw_payload.sections)) {
+          const list = Array.isArray(urls) ? urls : [urls];
+          lines.push(`**${sec}:**`);
+          for (const u of list) lines.push(`- ${u}`);
+        }
+        sectionsBlock = lines.join('\n');
+      }
       body = [
         `**Slug:** ${slug}`,
         `**Section:** ${target_section}`,
+        raw_payload?.source_type ? `**Source type:** ${raw_payload.source_type}` : null,
         '',
         '## Instructions',
         '',
-        raw_payload?.instructions || summary || '_(see media)_',
+        raw_payload?.instructions || summary || '_(see media/sources)_',
+        sectionsBlock,
         mediaBlock,
         '',
         '## Note for CC',
         '',
-        `Update \`_data/${slug}/visual_review_input.json\` to append into section "${target_section}" — append, NOT replace (per Q3 locked). Download media via \`scripts/visual-review/download-refs.mjs\` from file_ids above.`,
+        `Update \`_data/${slug}/visual_review_input.json\` to append into the listed sections — append, NOT replace (per Q3 locked). Download media via \`scripts/visual-review/download-refs.mjs\` (IG/direct URLs above OR file_ids).`,
         '',
         '---',
         `_Realized from intent #${intentIssue.number} (approved by owner via TG)._`,
