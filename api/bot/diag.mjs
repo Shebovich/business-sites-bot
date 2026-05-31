@@ -59,21 +59,29 @@ export default async function handler(req, res) {
     } catch (e) { res.statusCode = 500; res.end(JSON.stringify({ ok: false, error: e.message })); return; }
   }
 
-  // ?clearpool=1 — полная очистка пула лидов перед пересевом (gated). ВРЕМЕННОЕ.
+  // ?clearpool=1 — очистка ТОЛЬКО СВОБОДНЫХ лидов перед пересевом (gated).
+  // КРИТИЧНО (#186): взятые/закреплённые лиды НЕ трогаем — они неприкосновенны.
+  // Удаляем только записи без owner и со статусом new; нишевые пулы свободных; available.
   if (req.url?.includes('clearpool=1')) {
     const SECRET = (process.env.CLAUDE_NOTIFY_SECRET || '').trim();
     if (req.headers['x-notify-secret'] !== SECRET) { res.statusCode = 401; res.end(JSON.stringify({ ok: false, error: 'unauthorized' })); return; }
     try {
       const { getRedis } = await import('../../scripts/bot/lib/state.mjs');
       const r2 = getRedis();
-      let deleted = 0;
-      for (const pat of ['lead:*', 'leads:pool:*', 'leads:owner:*']) {
-        const ks = await r2.keys(pat);
-        for (const k of ks) { await r2.del(k); deleted++; }
+      let deleted = 0, kept = 0;
+      const all = (await r2.smembers('leads:all')) || [];
+      for (const k of all) {
+        const l = await r2.get(`lead:${k}`);
+        if (l && (l.owner || (l.status && l.status !== 'new'))) { kept++; continue; } // ВЗЯТОЕ — не трогаем
+        await r2.del(`lead:${k}`); await r2.srem('leads:all', k); deleted++;
       }
-      for (const k of ['leads:all', 'leads:available', 'leads:reoffer']) { await r2.del(k); deleted++; }
+      // нишевые пулы и available содержат только свободных — их безопасно пересобрать
+      const pools = await r2.keys('leads:pool:*');
+      for (const pk of pools) await r2.del(pk);
+      await r2.del('leads:available'); await r2.del('leads:reoffer');
+      // leads:owner:* и взятые lead:{key} остаются нетронутыми
       res.statusCode = 200; res.setHeader('content-type', 'application/json');
-      res.end(JSON.stringify({ ok: true, deleted }, null, 2)); return;
+      res.end(JSON.stringify({ ok: true, deleted, kept_taken: kept }, null, 2)); return;
     } catch (e) { res.statusCode = 500; res.end(JSON.stringify({ ok: false, error: e.message })); return; }
   }
 
