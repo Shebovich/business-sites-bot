@@ -80,6 +80,22 @@ export async function handleStart(ctx) {
   await ctx.reply(lines.join('\n'), { reply_markup: kb, parse_mode: 'HTML' });
 }
 
+// Готовое первое сообщение лиду — РАЗНОЕ под каждого (анти-спам #150), niche-aware.
+// Детерминированно по ключу: у разных лидов разный текст, у одного — стабильный.
+function outreachMessage(lead) {
+  const niche = String(lead.niche || '').toLowerCase();
+  const n = (niche && !['свой', 'misc', ''].includes(niche)) ? niche : 'ваши услуги';
+  const templates = [
+    (x) => `Здравствуйте! Увидел вашу рекламу (${x}). Делаю современные сайты под такие услуги — за пару дней бесплатно соберу прототип, чтобы вы оценили. Понравится — оставите за символическую сумму, нет — без обид. Показать?`,
+    (x) => `Добрый день! Вы продвигаете ${x} — есть предложение: соберу продающий сайт-визитку бесплатно как пример. Сайт, который превращает просмотры в заявки. Скинуть на оценку?`,
+    (x) => `Привет! Заметил вашу рекламу — ${x}. Делаю лендинги, которые реально приносят заявки. Готов за пару дней сделать прототип бесплатно. Интересно глянуть?`,
+    (x) => `Здравствуйте! Вижу, вы вкладываетесь в рекламу (${x}). Хороший сайт усилит отдачу от неё. Сделаю прототип бесплатно за пару дней — понравится, обсудим. Показать пример?`,
+    (x) => `Добрый день! Занимаюсь сайтами для таких сфер, как ${x}. Предлагаю бесплатно собрать вам прототип — посмотрите, решите. Без обязательств. Ок?`,
+  ];
+  let h = 0; for (const c of String(lead.key || lead.handle || 'x')) h = (h * 31 + c.charCodeAt(0)) >>> 0;
+  return templates[h % templates.length](n);
+}
+
 // --- Lead-gen Ф2: раздача лидов ассистентам (карточка + кнопки) ---
 function formatLeadCard(lead) {
   const lines = [
@@ -88,7 +104,8 @@ function formatLeadCard(lead) {
   ];
   if (lead.needs_manual_ig) lines.push('⚠️ <i>Instagram автоматически не нашёлся — найди профиль по названию вручную.</i>');
   else if (lead.contact_url) lines.push('✉️ Кнопка ниже откроет диалог в директ.');
-  lines.push('', 'Взять → написать в директ. Ответит — соберём прототип.');
+  lines.push('', '✍️ <b>Готовое сообщение</b> (нажми — скопируется):', `<code>${escapeHtml(outreachMessage(lead))}</code>`);
+  lines.push('', 'Скопируй → «Написать в директ» → вставь → отправь. У каждого лида текст свой, чтобы не словить бан за копипаст.');
   return lines.join('\n');
 }
 
@@ -195,6 +212,7 @@ async function renderLeadActions(ctx, key) {
   if (!l) { await ctx.reply('Лид не найден.'); return; }
   const lines = [`<b>${escapeHtml(l.name || l.handle)}</b>`, `Статус: ${l.status}`];
   if (l.needs_manual_ig) lines.push('⚠️ IG найти вручную по названию');
+  if (['taken', 'contacted'].includes(l.status)) lines.push('', '✍️ Сообщение (нажми — скопируется):', `<code>${escapeHtml(outreachMessage(l))}</code>`);
   const kb = new InlineKeyboard();
   if (l.contact_url) kb.url('✉️ Открыть директ', l.contact_url).row();
   if (l.status === 'taken') kb.text('✉️ Написал в ЛС', `lead:contacted:${key}`).row();
