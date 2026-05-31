@@ -104,6 +104,7 @@ function formatLeadCard(lead) {
   ];
   if (lead.needs_manual_ig) lines.push('⚠️ <i>Instagram автоматически не нашёлся — найди профиль по названию вручную.</i>');
   else if (lead.contact_url) lines.push('✉️ Кнопка ниже откроет диалог в директ.');
+  if (lead.has_site) lines.push(`⚠️ <i>У них уже есть сайт${lead.site_url ? ` (${escapeHtml(lead.site_url)})` : ''} — глянь, стоит ли предлагать новый.</i>`);
   lines.push('', '✍️ <b>Готовое сообщение</b> (нажми — скопируется):', `<code>${escapeHtml(outreachMessage(lead))}</code>`);
   lines.push('', 'Скопируй → «Написать в директ» → вставь → отправь. У каждого лида текст свой (анти-бан). Глянул их профиль — можешь добавить деталь под их бизнес, будет ещё лучше.');
   return lines.join('\n');
@@ -223,6 +224,7 @@ async function renderLeadActions(ctx, key) {
   if (!l) { await ctx.reply('Лид не найден.'); return; }
   const lines = [`<b>${escapeHtml(l.name || l.handle)}</b>`, `Статус: ${l.status}`];
   if (l.needs_manual_ig) lines.push('⚠️ IG найти вручную по названию');
+  if (l.has_site) lines.push(`⚠️ Уже есть сайт${l.site_url ? `: ${escapeHtml(l.site_url)}` : ''}`);
   if (['taken', 'contacted'].includes(l.status)) lines.push('', '✍️ Сообщение (нажми — скопируется):', `<code>${escapeHtml(outreachMessage(l))}</code>`);
   const kb = new InlineKeyboard();
   if (l.contact_url) kb.url('✉️ Открыть директ', l.contact_url).row();

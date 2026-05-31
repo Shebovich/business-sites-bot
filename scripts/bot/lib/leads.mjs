@@ -46,6 +46,7 @@ export async function upsertLead(lead) {
     key, handle: lead.handle, name: lead.name || '', niche,
     kind: lead.kind || 'fb', profile_url: lead.profile_url || '',
     contact_url: lead.contact_url || '', needs_manual_ig: !!lead.needs_manual_ig,
+    has_site: !!lead.has_site, site_url: lead.site_url || '', // #164 — у лида уже есть сайт
     source: lead.source || 'adlib', status: 'new', owner: null,
     created_at: now(), updated_at: now(),
     history: [{ s: 'new', at: now() }],
