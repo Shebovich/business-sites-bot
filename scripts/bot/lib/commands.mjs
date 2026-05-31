@@ -125,6 +125,30 @@ async function assistantNudgeReply(ctx) {
   await ctx.reply(assistantNudge(), { parse_mode: 'HTML', reply_markup: kb });
 }
 
+// Ассистент пишет/говорит вне явной сборки, НО у него есть активный лид (#138):
+// не шаблоним — заходим в сборку этого лида и отправляем сообщение в CC.
+// Возвращает true, если обработали (сборка/выбор лида), false → показать nudge.
+async function routeAssistantFreeform(ctx, content) {
+  const mine = await Leads.listByOwner(ctx.from.id).catch(() => []);
+  const active = mine.filter((l) => ['taken', 'contacted', 'in-build'].includes(l.status));
+  if (active.length === 1) {
+    const l = active[0];
+    await Leads.setBuilding(ctx.from.id, l.key);
+    if (l.status !== 'in-build') await Leads.setStatus(l.key, 'in-build', ctx.from.id);
+    try { await createLeadBuildIssue(ctx, l.key, content); }
+    catch (e) { console.error('[freeform build]:', e.message); await ctx.reply('⚠️ Не смог передать в сборку: ' + e.message); return true; }
+    await ctx.reply(`🔨 Принял по «${l.name || l.handle}» — собираю прототип. Добавляй детали (текст/голос/фото) — учту. Будет готово — пришлю ссылку.`);
+    return true;
+  }
+  if (active.length > 1) {
+    const kb = new InlineKeyboard();
+    for (const l of active.slice(0, 10)) kb.text(`🔨 ${(l.name || l.handle).slice(0, 35)}`, `lead:build:${l.key}`).row();
+    await ctx.reply('У тебя несколько лидов. По какому собрать сайт? Выбери — потом повтори, что нужно 👇', { reply_markup: kb });
+    return true;
+  }
+  return false;
+}
+
 // @ника / ссылка → handle
 function parseHandle(s) {
   s = String(s || '').trim();
@@ -3356,9 +3380,13 @@ export async function handlePhoto(ctx) {
     return;
   }
 
-  // Assistant вне сборки прототипа → nudge (легаси photo-section/intent убран, #135).
+  // Assistant вне сборки: есть активный лид → фото в сборку (#138), иначе подсказка.
   if (ctx.role === 'assistant') {
-    await ctx.reply('📷 Фото пригодится, когда соберёшь прототип. Открой «📋 Мои лиды» → нужный лид → «🔨 Собрать прототип», и тогда шли фото — я добавлю на сайт.');
+    const sizes = ctx.message.photo;
+    const largest = sizes[sizes.length - 1];
+    const caption = (ctx.message.caption || '').trim();
+    if (await routeAssistantFreeform(ctx, { fileId: largest.file_id, kind: 'photo', text: caption })) return;
+    await ctx.reply('📷 Сначала возьми лида («🎯 Получить лида»). Когда будешь собирать его сайт — шли фото, добавлю.');
     return;
   }
 
@@ -3526,7 +3554,8 @@ export async function handleVoice(ctx) {
     return;
   }
 
-  // Assistant вне сборки прототипа → nudge (легаси intent-router убран, #135).
+  // Assistant вне сборки: есть активный лид → в сборку (#138), иначе nudge (#135).
+  if (await routeAssistantFreeform(ctx, { text: transcript })) return;
   await assistantNudgeReply(ctx);
 }
 
@@ -3667,8 +3696,11 @@ export async function handleText(ctx) {
   // Build-mode (Ф3): человек собирает прототип лида — все сообщения идут в CC.
   if (await maybeRouteBuild(ctx, { text })) return;
 
-  // Lead-gen bot: ассистент вне сборки → единый nudge. Никакого легаси (#135).
-  if (ctx.role === 'assistant') { await assistantNudgeReply(ctx); return; }
+  // Lead-gen bot: ассистент вне сборки. Есть активный лид → в сборку (#138), иначе nudge (#135).
+  if (ctx.role === 'assistant') {
+    if (await routeAssistantFreeform(ctx, { text })) return;
+    await assistantNudgeReply(ctx); return;
+  }
 
   // Interview answer priority — если chat сейчас отвечает на интервью, любой
   // free-form текст идёт в текущий вопрос. /cancel_interview прерывает.
