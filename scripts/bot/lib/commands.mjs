@@ -38,6 +38,7 @@ import { parseScoutInput, buildScoutIssue } from './scout-parser.mjs';
 import { intakeAssistantInput, realizeIntent, startIntentEdit, rejectIntent } from './intent.mjs';
 import * as Leads from './leads.mjs';
 import * as Attn from './attention.mjs';
+import * as Trust from './trust.mjs';
 import { transcribeTgVoice } from './voice-transcribe.mjs';
 import { getInterviewWaitingForChat, captureInterviewAnswer, getInterviewSession, cancelInterview } from './state.mjs';
 import { InlineKeyboard } from 'grammy';
@@ -2343,21 +2344,29 @@ export async function handleCallback(ctx) {
       }
       if (action === 'builddone') {
         await Leads.clearBuilding(chatId);
-        await Leads.setStatus(arg, 'owner-review', chatId);
-        try { await ctx.editMessageText('✅ Отправил прототип на ревью Pavel\'у. Жди — approve или правки.'); } catch {}
+        const l = await Leads.getLead(arg);
+        const leadName = (l && (l.name || l.handle)) || arg;
+        // #68 — показываем ИМЯ инициатора, не chat_id
+        let who = String(chatId);
+        try { const chat = await ctx.api.getChat(chatId); who = chat.first_name || chat.username ? `${chat.first_name || ''}${chat.username ? ` @${chat.username}` : ''}`.trim() : who; } catch {}
+        const OWNER = (process.env.TG_OWNER_CHAT_ID || '').replace(/^﻿/, '').trim();
+        const trusted = await Trust.isTrusted(chatId).catch(() => false);
         try {
-          const l = await Leads.getLead(arg);
-          const leadName = (l && (l.name || l.handle)) || arg;
-          // #68 — показываем ИМЯ инициатора, не chat_id
-          let who = String(chatId);
-          try { const chat = await ctx.api.getChat(chatId); who = chat.first_name || chat.username ? `${chat.first_name || ''}${chat.username ? ` @${chat.username}` : ''}`.trim() : who; } catch {}
-          const OWNER = (process.env.TG_OWNER_CHAT_ID || '').replace(/^﻿/, '').trim();
-          if (OWNER) {
-            const kb = new InlineKeyboard().text('✅ Approve', `leadreview:approve:${arg}`).text('✏️ Правки', `leadreview:fix:${arg}`);
-            await ctx.api.sendMessage(OWNER, `👀 <b>Прототип на ревью</b>\nЛид: ${escapeHtml(leadName)}\n👤 От: ${escapeHtml(who)}`, { parse_mode: 'HTML', reply_markup: kb }).catch(() => {});
+          if (trusted) {
+            // Ф7 — доверенный: авто-одобрение (QA уже прошёл при сборке), owner видит в сводке.
+            await Leads.setStatus(arg, 'approved', chatId);
+            await ctx.editMessageText('✅ Готово! Ты доверенный — отправляй ссылку лиду сразу. Pavel увидит в сводке.').catch(() => {});
+            await Attn.addItem({ type: 'prototype', priority: 'info', title: `Авто-одобрено (доверенный): ${leadName}`, initiator: who, lead_key: arg, fixed: true, suggested_action: `Если плохо — напиши «разжаловать ${who.replace(/^@?/, '')}»`, fingerprint: `proto-${arg}`, dedupTtl: 3600 }).catch(() => {});
+          } else {
+            await Leads.setStatus(arg, 'owner-review', chatId);
+            await ctx.editMessageText('✅ Отправил прототип на ревью Pavel\'у. Жди — approve или правки.').catch(() => {});
+            if (OWNER) {
+              const kb = new InlineKeyboard().text('✅ Approve', `leadreview:approve:${arg}`).text('✏️ Правки', `leadreview:fix:${arg}`);
+              await ctx.api.sendMessage(OWNER, `👀 <b>Прототип на ревью</b>\nЛид: ${escapeHtml(leadName)}\n👤 От: ${escapeHtml(who)}`, { parse_mode: 'HTML', reply_markup: kb }).catch(() => {});
+            }
+            // Ф5.5 — дублируем в очередь, чтобы не потерялось, если owner не нажал сразу
+            await Attn.addItem({ type: 'prototype', priority: 'normal', title: `Прототип на ревью: ${leadName}`, initiator: who, lead_key: arg, suggested_action: 'Approve или отправить правки', fingerprint: `proto-${arg}`, dedupTtl: 3600 }).catch(() => {});
           }
-          // Ф5.5 — дублируем в очередь, чтобы не потерялось, если owner не нажал сразу
-          await Attn.addItem({ type: 'prototype', priority: 'normal', title: `Прототип на ревью: ${leadName}`, initiator: who, lead_key: arg, suggested_action: 'Approve или отправить правки', fingerprint: `proto-${arg}`, dedupTtl: 3600 }).catch(() => {});
         } catch (e) { console.error('[builddone notify]:', e.message); }
         return;
       }
@@ -2375,8 +2384,19 @@ export async function handleCallback(ctx) {
       if (action === 'approve') {
         await Leads.setStatus(key, 'approved', ctx.from.id);
         try { await ctx.editMessageText(`✅ Approved: ${(l && (l.name || l.handle)) || key}`); } catch {}
-        if (l && l.owner) await ctx.api.sendMessage(l.owner, `✅ Pavel одобрил прототип для «${(l && (l.name || l.handle)) || key}». Можешь отправлять лиду.`).catch(() => {});
+        if (l && l.owner) {
+          await ctx.api.sendMessage(l.owner, `✅ Pavel одобрил прототип для «${(l && (l.name || l.handle)) || key}». Можешь отправлять лиду.`).catch(() => {});
+          // Ф7 — засчитываем доверие; на пороге — повышаем
+          try {
+            const { promoted, trust } = await Trust.recordApproval(l.owner);
+            if (promoted) {
+              await ctx.api.sendMessage(ctx.from.id, `🎖 Ассистент получил статус «доверенный» (${trust.approvals} одобрений). Его прототипы, прошедшие авто-QA, теперь идут лиду сразу — ты видишь их в сводке, без ручного approve. Разжаловать в любой момент: «разжаловать <имя>».`).catch(() => {});
+              await ctx.api.sendMessage(l.owner, '🎖 Ты теперь доверенный ассистент — следующие прототипы можно отправлять лиду сразу после «Готово», без ожидания ревью.').catch(() => {});
+            }
+          } catch (e) { console.error('[trust approve]:', e.message); }
+        }
       } else if (action === 'fix') {
+        if (l && l.owner) await Trust.recordFix(l.owner).catch(() => {}); // правки → streak сбрасывается
         await setCommandPending(ctx.from.id, { command: 'leadreview_fix', extras: { key } });
         try { await ctx.editMessageText('✏️ Напиши, что поправить — передам ассистенту.'); } catch {}
       }
@@ -3732,6 +3752,16 @@ export async function handleText(ctx) {
     // (симметрия с handleVoice owner path). Pavel feedback 2026-05-27:
     // больше никакого «открой задачу /list» legacy.
     if (ctx.role === 'owner') {
+      // Ф7 — разжаловать доверенного ассистента: «разжаловать @username»
+      const demote = text.match(/^\s*разжаловать\s+@?([A-Za-z0-9_]{3,})/i);
+      if (demote) {
+        try {
+          const chat = await ctx.api.getChat('@' + demote[1]);
+          await Trust.setLevel(chat.id, 'new');
+          await ctx.reply(`✅ ${chat.first_name || ('@' + demote[1])} снова на ревью — прототипы пойдут через твоё одобрение.`);
+        } catch (e) { await ctx.reply(`Не нашёл ассистента @${demote[1]}: ${e.message}`); }
+        return;
+      }
       // Ф5.5 — owner открывает inbox голосом/текстом в любой момент.
       if (/^\s*(инбокс|очеред|что жд[её]т|на ревью|мои задачи|задачи)\s*[?.!]*\s*$/i.test(text)) {
         const items = await Attn.listOpen(20);
