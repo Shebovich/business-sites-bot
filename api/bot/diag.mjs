@@ -88,6 +88,10 @@ export default async function handler(req, res) {
       const owner = String(b.owner || process.env.TG_OWNER_CHAT_ID || '').trim();
       const up = await L.upsertLead({ handle: b.handle, name: b.name || '', kind: 'ig', niche: b.niche || 'свой', contact_url: b.contact_url || `https://ig.me/m/${L.normKey(b.handle)}`, profile_url: b.profile_url || `https://instagram.com/${L.normKey(b.handle)}`, source: 'owner-manual' });
       const key = up.key || L.normKey(b.handle);
+      // обновить поля даже если лид уже был (исправление имени/ниши)
+      const { getRedis } = await import('../../scripts/bot/lib/state.mjs');
+      const rr = getRedis(); const rec = await rr.get(`lead:${key}`);
+      if (rec) { if (b.name) rec.name = b.name; if (b.niche) rec.niche = b.niche; if (b.contact_url) rec.contact_url = b.contact_url; await rr.set(`lead:${key}`, rec); }
       const take = await L.takeLead(owner, key);
       if (take.ok) await L.setStatus(key, 'contacted', owner);
       res.statusCode = 200; res.setHeader('content-type', 'application/json');
