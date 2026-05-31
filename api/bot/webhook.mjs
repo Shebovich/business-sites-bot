@@ -34,55 +34,16 @@ const onboardingPinged = new Set();
 // our current command list. Fire-and-forget — failures are non-fatal.
 let commandsRegistered = false;
 
+// Все пайплайн-команды убраны (2026-05-31). Бот работает через свободную речь
+// (→ Claude Code / intent-router) + inline-кнопки. Остаётся только /start.
+// Действия и решения мигрируют в речь+кнопки в новой системе ассистентов (см. дизайн-документ).
 const COMMON_COMMANDS = [
-  { command: 'start',    description: 'Привет + статус' },
-  { command: 'help',     description: 'Команды (/help <команда> — детали)' },
-  { command: 'list',     description: 'Активные задачи' },
-  { command: 'current',  description: 'Текущая задача + секции' },
-  { command: 'preview',  description: 'Что собрано в задаче' },
-  { command: 'note',     description: 'Заметка к задаче' },
-  { command: 'notes',    description: 'Список заметок' },
-  { command: 'rm_note',  description: 'Удалить заметку N' },
-  { command: 'clear_notes', description: 'Очистить все заметки' },
-  { command: 'skip',     description: 'Пропустить секцию' },
-  { command: 'unskip',   description: 'Отменить skip' },
-  { command: 'rm',       description: 'Удалить N-ое фото из секции' },
-  { command: 'cancel',   description: 'Сбросить текущую задачу' },
-  { command: 'block',    description: 'N <причина> — поставить задачу на паузу' },
-  { command: 'unblock',  description: 'N — снять паузу' },
-  { command: 'abandon',  description: 'N <причина> — отпустить задачу' },
-  { command: 'bug',      description: 'Сообщить о проблеме бота (с фото/видео)' },
-  { command: 'prompt',   description: 'Отправить задачу/идею для Claude Code' },
-  { command: 'done',     description: 'Отправить начатый bug/prompt' },
-  { command: 'whoami',   description: 'Моя роль + chat_id' },
-  { command: 'playbook', description: 'Типовые сценарии для роли' },
+  { command: 'start', description: 'Начать / статус' },
 ];
 
-const ASSISTANT_COMMANDS = [
-  ...COMMON_COMMANDS,
-  { command: 'submit',  description: 'Передать задачу owner на ревью' },
-  { command: 'scout',   description: 'Предложить лид (2GIS/IG/имя)' },
-];
+const ASSISTANT_COMMANDS = [...COMMON_COMMANDS];
 
-const OWNER_COMMANDS = [
-  ...COMMON_COMMANDS,
-  { command: 'done_all',     description: 'Собрать сайт (solo, автозапуск Actions)' },
-  { command: 'auto_photos',  description: 'Q14/Q15 auto-curation fallback' },
-  { command: 'owner_review', description: 'Submit\'ы ассистентов на ревью' },
-  { command: 'approve',      description: 'Одобрить submit → Actions rebuild' },
-  { command: 'approve_all',  description: 'Batch-approve всех + автосборка' },
-  { command: 'pitch_review', description: 'Батч-ревью готовых сайтов' },
-  { command: 'sold',         description: 'N [notes] — продано' },
-  { command: 'lost',         description: 'N [reason] — не сложилось' },
-  { command: 'ghosted',      description: 'N — клиент молчит' },
-  { command: 'stats',        description: 'Pipeline conversion analytics' },
-  { command: 'scout',        description: 'Следующий лид или ad-hoc' },
-  { command: 'scout_review', description: 'Inbox новых scouted' },
-  { command: 'reassign',     description: 'N <chatId> — передать задачу другому' },
-  { command: 'bug_review',   description: 'Inbox bug-репортов от ассистентов' },
-  { command: 'prompt_review', description: 'Inbox prompts (задач/идей) от ассистентов' },
-  { command: 'role',         description: 'Debug: смена эффективной роли (30 мин)' },
-];
+const OWNER_COMMANDS = [...COMMON_COMMANDS];
 
 async function registerCommandsOnce(token, ownerId, assistantIds) {
   if (commandsRegistered) return;
@@ -280,44 +241,9 @@ function getBot() {
     }
   });
 
+  // Все пайплайн-команды убраны (2026-05-31). Свободная речь (→ CC/intent) +
+  // inline-кнопки (callback_query) ниже. Печатная команда осталась одна — /start.
   bot.command('start',        handleStart);
-  bot.command('help',         handleHelp);
-  bot.command('list',         handleList);
-  bot.command('current',      handleCurrent);
-  bot.command('skip',         handleSkip);
-  bot.command('unskip',       handleUnskip);
-  bot.command('preview',      handlePreview);
-  bot.command('rm',           handleRm);
-  bot.command('note',         handleNote);
-  bot.command('notes',        handleNotes);
-  bot.command('rm_note',      handleRmNote);
-  bot.command('clear_notes',  handleClearNotes);
-  bot.command('cancel',       handleCancel);
-  bot.command('done_all',     handleDoneAll);
-  bot.command('auto_photos',  handleAutoPhotos);
-  bot.command('submit',       handleSubmit);
-  bot.command('owner_review', handleOwnerReview);
-  bot.command('approve',      handleApprove);
-  bot.command('approve_all',  handleApproveAll);
-  bot.command('whoami',       handleWhoami);
-  bot.command('playbook',     handlePlaybook);
-  bot.command('role',         handleRole);
-  bot.command('pitch_review', handlePitchReview);
-  bot.command('sold',         handleSold);
-  bot.command('lost',         handleLost);
-  bot.command('ghosted',      handleGhosted);
-  bot.command('stats',        handleStats);
-  bot.command('scout',        handleScout);
-  bot.command('scout_review', handleScoutReview);
-  bot.command('block',        handleBlock);
-  bot.command('unblock',      handleUnblock);
-  bot.command('abandon',      handleAbandon);
-  bot.command('reassign',     handleReassign);
-  bot.command('bug',           handleBug);
-  bot.command('done',          handleDone);
-  bot.command('bug_review',    handleBugReview);
-  bot.command('prompt',        handlePrompt);
-  bot.command('prompt_review', handlePromptReview);
 
   bot.on('callback_query',   handleCallback);
   bot.on('message:photo',    handlePhoto);
