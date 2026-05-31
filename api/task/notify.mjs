@@ -19,6 +19,7 @@
 
 import { getAssistantChatId } from '../../scripts/bot/lib/state.mjs';
 import { sendMessage } from '../../scripts/bot/lib/tg-api.mjs';
+import * as Attn from '../../scripts/bot/lib/attention.mjs';
 import { assertEnv, getEnv } from '../../scripts/bot/config.mjs';
 
 assertEnv(['TG_BOT_TOKEN', 'TG_OWNER_CHAT_ID', 'CLAUDE_NOTIFY_SECRET']);
@@ -26,13 +27,45 @@ const OWNER_ID = String(getEnv('TG_OWNER_CHAT_ID')).trim();
 const SECRET = getEnv('CLAUDE_NOTIFY_SECRET').trim();
 
 export default async function handler(req, res) {
+  const url = req.url || '';
+  const provided = req.headers['x-notify-secret'];
+  const authed = provided && provided === SECRET;
+  const isCron = !!req.headers['x-vercel-cron'];
+
+  // === Ф5.5 Owner Attention Queue ===
+  // Дайджест (cron утро/вечер ИЛИ ручной триггер CC): разбудить отложенные → скан аномалий → сводка owner'у.
+  if (url.includes('attn=digest')) {
+    if (!authed && !isCron) { res.status(401).json({ ok: false, error: 'unauthorized' }); return; }
+    try {
+      await Attn.wakeSnoozed();
+      const scan = await Attn.scanAnomalies();
+      const items = await Attn.listOpen(50);
+      const c = await Attn.counts();
+      const hourMinsk = (new Date().getUTCHours() + 3) % 24;
+      const period = hourMinsk < 14 ? 'утро' : 'вечер';
+      await sendMessage(OWNER_ID, Attn.digestText(items, c, period), { parse_mode: 'HTML', disable_web_page_preview: true, reply_markup: Attn.digestKeyboard() });
+      res.status(200).json({ ok: true, scanned: scan.created, open: items.length }); return;
+    } catch (e) { console.error('[attn digest]', e); res.status(500).json({ ok: false, error: e.message }); return; }
+  }
+  // Добавить элемент (CC): urgent → сразу owner'у с кнопками; обычное → копится в очередь.
+  if (url.includes('attn=add')) {
+    if (req.method !== 'POST' || !authed) { res.status(401).json({ ok: false, error: 'unauthorized' }); return; }
+    try {
+      const item = typeof req.body === 'string' ? JSON.parse(req.body) : (req.body || {});
+      const r = await Attn.addItem(item);
+      if (r.deduped) { res.status(200).json({ ok: true, deduped: true }); return; }
+      if (r.rec && r.rec.priority === 'urgent') {
+        await sendMessage(OWNER_ID, `🔔 <b>Срочно</b>\n\n${Attn.itemText(r.rec)}`, { parse_mode: 'HTML', disable_web_page_preview: true, reply_markup: Attn.itemKeyboard(r.rec) });
+      }
+      res.status(200).json({ ok: true, id: r.id }); return;
+    } catch (e) { console.error('[attn add]', e); res.status(500).json({ ok: false, error: e.message }); return; }
+  }
+
   if (req.method !== 'POST') {
     res.status(405).json({ ok: false, error: 'method_not_allowed' });
     return;
   }
-
-  const provided = req.headers['x-notify-secret'];
-  if (!provided || provided !== SECRET) {
+  if (!authed) {
     res.status(401).json({ ok: false, error: 'unauthorized' });
     return;
   }

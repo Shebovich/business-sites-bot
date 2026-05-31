@@ -37,6 +37,7 @@ import { renderPlaybook } from './playbook.mjs';
 import { parseScoutInput, buildScoutIssue } from './scout-parser.mjs';
 import { intakeAssistantInput, realizeIntent, startIntentEdit, rejectIntent } from './intent.mjs';
 import * as Leads from './leads.mjs';
+import * as Attn from './attention.mjs';
 import { transcribeTgVoice } from './voice-transcribe.mjs';
 import { getInterviewWaitingForChat, captureInterviewAnswer, getInterviewSession, cancelInterview } from './state.mjs';
 import { InlineKeyboard } from 'grammy';
@@ -2376,6 +2377,41 @@ export async function handleCallback(ctx) {
     return;
   }
 
+  // Ф5.5 Owner Attention Queue — owner разгребает inbox кнопками.
+  // attn:list | attn:open:{id} | attn:done|fix|snooze|dismiss:{id}
+  if (data.startsWith('attn:')) {
+    if (ctx.role !== 'owner') return;
+    const [, action, id] = data.split(':');
+    try {
+      if (action === 'list') {
+        const items = await Attn.listOpen(20);
+        if (!items.length) { try { await ctx.editMessageText('📥 Очередь пуста — ничего не ждёт решения. 👌'); } catch {} return; }
+        const kb = new InlineKeyboard();
+        for (const it of items) kb.text(`${Attn.TYPE_EMOJI[it.type] || '•'} #${it.id} ${(it.title || '').slice(0, 40)}`, `attn:open:${it.id}`).row();
+        try { await ctx.editMessageText(`📥 <b>Очередь</b> (${items.length}):`, { parse_mode: 'HTML', reply_markup: kb }); } catch {}
+        return;
+      }
+      const it = await Attn.getItem(id);
+      if (!it) { try { await ctx.answerCallbackQuery({ text: 'Элемент не найден', show_alert: true }); } catch {} return; }
+      if (action === 'open') {
+        await ctx.reply(Attn.itemText(it), { parse_mode: 'HTML', disable_web_page_preview: true, reply_markup: Attn.itemKeyboard(it) });
+      } else if (action === 'done') {
+        await Attn.setStatus(id, 'done');
+        try { await ctx.editMessageText(`✅ Закрыто: ${escapeHtml(it.title)}`, { parse_mode: 'HTML' }); } catch {}
+      } else if (action === 'dismiss') {
+        await Attn.setStatus(id, 'dismissed');
+        try { await ctx.editMessageText(`🗑 Убрано: ${escapeHtml(it.title)}`, { parse_mode: 'HTML' }); } catch {}
+      } else if (action === 'snooze') {
+        await Attn.setStatus(id, 'snoozed');
+        try { await ctx.editMessageText(`🔕 Отложено на 4ч: ${escapeHtml(it.title)}`, { parse_mode: 'HTML' }); } catch {}
+      } else if (action === 'fix') {
+        await setCommandPending(String(ctx.from.id), { command: 'attn_fix', extras: { id } });
+        try { await ctx.reply('✏️ Напиши, что сделать — передам в работу (CC).'); } catch {}
+      }
+    } catch (e) { console.error('[attn cb]:', e.message); }
+    return;
+  }
+
   // Owner-only: approve/reject pending access request from an unknown chat.
   // Callback data shape: `access:approve:<chatId>` / `access:reject:<chatId>`.
   if (data.startsWith('access:')) {
@@ -3569,6 +3605,20 @@ export async function handleText(ctx) {
         await ctx.reply(`✅ Добавил и закрепил за тобой: ${escapeHtml(handle)}. Напиши ему в ЛС. Когда ответит — «Мои лиды» → 🔨 Собрать прототип.`, { parse_mode: 'HTML' });
         return;
       }
+      case 'attn_fix': {
+        const id = pending.extras?.id;
+        const it = await Attn.getItem(id);
+        const { createIssue } = await import('./github-api.mjs');
+        const ctxLine = it ? `Элемент очереди #${it.id} (${it.type}): ${it.title}${it.lead_key ? ` · лид ${it.lead_key}` : ''}` : `Элемент очереди #${id}`;
+        const body =
+          `<!-- owner-text-v1 -->\nfrom_chat: ${ctx.from.id}\nattn_id: ${id}\n<!-- /owner-text-v1 -->\n\n` +
+          `## Запрос (по элементу инбокса)\n\n${ctxLine}\n\nЧто сделать: ${text}\n\n---\n\n` +
+          `CC reactive: выполни → relay reply owner (from_chat) → close.`;
+        await createIssue({ title: `[owner-text] attn#${id}: ${String(text).slice(0, 50)}`, body, labels: ['prompt'] });
+        if (it) await Attn.setStatus(id, 'done');
+        await ctx.reply('Передал в работу. Отвечу, как сделаю.');
+        return;
+      }
       case 'leadreview_fix': {
         const k = pending.extras?.key;
         const l = await Leads.getLead(k);
@@ -3675,6 +3725,16 @@ export async function handleText(ctx) {
     // (симметрия с handleVoice owner path). Pavel feedback 2026-05-27:
     // больше никакого «открой задачу /list» legacy.
     if (ctx.role === 'owner') {
+      // Ф5.5 — owner открывает inbox голосом/текстом в любой момент.
+      if (/^\s*(инбокс|очеред|что жд[её]т|на ревью|мои задачи|задачи)\s*[?.!]*\s*$/i.test(text)) {
+        const items = await Attn.listOpen(20);
+        const c = await Attn.counts();
+        if (!items.length) { await ctx.reply('📥 Очередь пуста — ничего не ждёт решения. 👌'); return; }
+        const kb = new InlineKeyboard();
+        for (const it of items) kb.text(`${Attn.TYPE_EMOJI[it.type] || '•'} #${it.id} ${(it.title || '').slice(0, 40)}`, `attn:open:${it.id}`).row();
+        await ctx.reply(Attn.digestText(items, c, 'сейчас'), { parse_mode: 'HTML', disable_web_page_preview: true, reply_markup: kb });
+        return;
+      }
       const preview = text.length > 60 ? text.slice(0, 60) : text;
       try {
         const { createIssue } = await import('./github-api.mjs');
