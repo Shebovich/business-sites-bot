@@ -133,11 +133,12 @@ async function routeAssistantFreeform(ctx, content) {
   const active = mine.filter((l) => ['taken', 'contacted', 'in-build'].includes(l.status));
   if (active.length === 1) {
     const l = active[0];
+    // Сообщение может быть И запросом на сборку, И вопросом про лида («мёртвый, что делать?»).
+    // Не презюмируем — отдаём в CC, он читает интент и либо строит, либо отвечает/советует (#140).
     await Leads.setBuilding(ctx.from.id, l.key);
-    if (l.status !== 'in-build') await Leads.setStatus(l.key, 'in-build', ctx.from.id);
     try { await createLeadBuildIssue(ctx, l.key, content); }
-    catch (e) { console.error('[freeform build]:', e.message); await ctx.reply('⚠️ Не смог передать в сборку: ' + e.message); return true; }
-    await ctx.reply(`🔨 Принял по «${l.name || l.handle}» — собираю прототип. Добавляй детали (текст/голос/фото) — учту. Будет готово — пришлю ссылку.`);
+    catch (e) { console.error('[freeform route]:', e.message); await ctx.reply('⚠️ Не смог передать: ' + e.message); return true; }
+    await ctx.reply(`📨 Принял по «${l.name || l.handle}» 👀 Секунду — гляну и отвечу.`);
     return true;
   }
   if (active.length > 1) {
@@ -204,9 +205,12 @@ async function createLeadBuildIssue(ctx, key, content) {
     `<!-- lead-build-v1 -->\nfrom_chat: ${ctx.from.id}\nlead_key: ${key}\nlead_name: ${name}\n` +
     `lead_url: ${(l && l.profile_url) || ''}\nlead_niche: ${(l && l.niche) || ''}\n` +
     (content.fileId ? `file_id: ${content.fileId}\n` : '') +
-    `<!-- /lead-build-v1 -->\n\n## Запрос\n\n${reqText}\n\n---\n\n` +
-    `CC: lead-gen сборка прототипа для лида «${name}» (${(l && l.profile_url) || ''}, ниша ${(l && l.niche) || ''}). ` +
-    `Исследуй лид (IG/сайт), собери/правь прототип, задеплой, relay reply ассистенту (from_chat). ` +
+    `<!-- /lead-build-v1 -->\n\n## Сообщение ассистента\n\n${reqText}\n\n---\n\n` +
+    `CC: сообщение от ассистента по лиду «${name}» (${(l && l.profile_url) || ''}, ниша ${(l && l.niche) || ''}). ` +
+    `СНАЧАЛА прочитай интент:\n` +
+    `• Просьба собрать/правки/детали бизнеса → исследуй лид (IG/сайт), собери/правь прототип, задеплой, relay reply ассистенту (from_chat) со ссылкой.\n` +
+    `• Вопрос/проблема (лид мёртвый/без активности, не отвечает, что делать, сомнение) → НЕ строй. Ответь/посоветуй ассистенту через relay (from_chat). Для мёртвого лида (старые посты) — посоветуй отклонить (кнопка ❌ на карточке) и взять следующего. ` +
+    `Можешь проверить активность профиля сам.\n` +
     (content.fileId ? `Фото/медиа: /api/bug/media?file_id=${content.fileId}.` : '');
   return await createIssue({ title: `[lead-build] ${name}: ${String(reqText).slice(0, 50)}`, body, labels: ['prompt'] });
 }
