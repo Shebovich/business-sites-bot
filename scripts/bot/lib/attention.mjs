@@ -81,6 +81,14 @@ export async function wakeSnoozed() {
   return due.length;
 }
 
+// Закрыть открытые элементы по лиду (напр. прототип одобрен/ушёл в правки).
+export async function doneByLead(leadKey, type = null) {
+  const items = await listOpen(200);
+  let n = 0;
+  for (const it of items) { if (it.lead_key === leadKey && (!type || it.type === type)) { await setStatus(it.id, 'done'); n++; } }
+  return n;
+}
+
 export async function counts() {
   const items = await listOpen(200);
   const byType = {}; let urgent = 0;

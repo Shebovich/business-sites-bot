@@ -2347,11 +2347,17 @@ export async function handleCallback(ctx) {
         try { await ctx.editMessageText('✅ Отправил прототип на ревью Pavel\'у. Жди — approve или правки.'); } catch {}
         try {
           const l = await Leads.getLead(arg);
+          const leadName = (l && (l.name || l.handle)) || arg;
+          // #68 — показываем ИМЯ инициатора, не chat_id
+          let who = String(chatId);
+          try { const chat = await ctx.api.getChat(chatId); who = chat.first_name || chat.username ? `${chat.first_name || ''}${chat.username ? ` @${chat.username}` : ''}`.trim() : who; } catch {}
           const OWNER = (process.env.TG_OWNER_CHAT_ID || '').replace(/^﻿/, '').trim();
           if (OWNER) {
             const kb = new InlineKeyboard().text('✅ Approve', `leadreview:approve:${arg}`).text('✏️ Правки', `leadreview:fix:${arg}`);
-            await ctx.api.sendMessage(OWNER, `👀 Прототип на ревью\nЛид: ${(l && (l.name || l.handle)) || arg}\nОт ассистента: ${chatId}`, { reply_markup: kb }).catch(() => {});
+            await ctx.api.sendMessage(OWNER, `👀 <b>Прототип на ревью</b>\nЛид: ${escapeHtml(leadName)}\n👤 От: ${escapeHtml(who)}`, { parse_mode: 'HTML', reply_markup: kb }).catch(() => {});
           }
+          // Ф5.5 — дублируем в очередь, чтобы не потерялось, если owner не нажал сразу
+          await Attn.addItem({ type: 'prototype', priority: 'normal', title: `Прототип на ревью: ${leadName}`, initiator: who, lead_key: arg, suggested_action: 'Approve или отправить правки', fingerprint: `proto-${arg}`, dedupTtl: 3600 }).catch(() => {});
         } catch (e) { console.error('[builddone notify]:', e.message); }
         return;
       }
@@ -2365,6 +2371,7 @@ export async function handleCallback(ctx) {
     const [, action, key] = data.split(':');
     try {
       const l = await Leads.getLead(key);
+      await Attn.doneByLead(key, 'prototype').catch(() => {}); // убрать из инбокса
       if (action === 'approve') {
         await Leads.setStatus(key, 'approved', ctx.from.id);
         try { await ctx.editMessageText(`✅ Approved: ${(l && (l.name || l.handle)) || key}`); } catch {}
