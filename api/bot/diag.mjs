@@ -37,6 +37,24 @@ export default async function handler(req, res) {
     }
   }
 
+  // ?seedpool=1 — засев пула лидов из POST-тела { leads:[{handle,name,kind,profile_url,niche}] }. Gated. ВРЕМЕННОЕ.
+  if (req.url?.includes('seedpool=1')) {
+    const SECRET = (process.env.CLAUDE_NOTIFY_SECRET || '').trim();
+    if (req.headers['x-notify-secret'] !== SECRET) { res.statusCode = 401; res.end(JSON.stringify({ ok: false, error: 'unauthorized' })); return; }
+    try {
+      const L = await import('../../scripts/bot/lib/leads.mjs');
+      let body = req.body;
+      if (typeof body === 'string') body = JSON.parse(body);
+      const list = (body && body.leads) || [];
+      const seeded = await L.seedLeads(list.map((l) => ({ ...l, source: 'adlib' })));
+      const niches = [...new Set(list.map((x) => x.niche))];
+      const pools = {};
+      for (const n of niches) pools[n] = await L.poolStats(n);
+      res.statusCode = 200; res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({ ok: true, seeded, pools }, null, 2)); return;
+    } catch (e) { res.statusCode = 500; res.end(JSON.stringify({ ok: false, error: e.message })); return; }
+  }
+
   // Identify bot via getMe so мы знаем КАКОМУ именно боту owner должен писать /start.
   let botInfo = null;
   let getMeError = null;

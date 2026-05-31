@@ -36,6 +36,7 @@ import { renderHelp, renderTopicHelp } from './help.mjs';
 import { renderPlaybook } from './playbook.mjs';
 import { parseScoutInput, buildScoutIssue } from './scout-parser.mjs';
 import { intakeAssistantInput, realizeIntent, startIntentEdit, rejectIntent } from './intent.mjs';
+import * as Leads from './leads.mjs';
 import { transcribeTgVoice } from './voice-transcribe.mjs';
 import { getInterviewWaitingForChat, captureInterviewAnswer, getInterviewSession, cancelInterview } from './state.mjs';
 import { InlineKeyboard } from 'grammy';
@@ -51,19 +52,47 @@ const STUB_M2 = 'Эта команда появится в M2. Сейчас до
 // ---- M1 real handlers ----------------------------------------------------
 
 export async function handleStart(ctx) {
-  const tasks = await safeGetActiveTasks();
+  const kb = new InlineKeyboard().text('🎯 Получить лида', 'lead:next');
   const lines = [
-    '👋 Бот визуального ревью готов.',
+    '👋 Привет! Я бот агентства Shebovich.',
     '',
-    `Активных задач: ${tasks.length}`,
+    'Жми кнопку — получишь лида в работу. Дальше просто пиши/говори мне (голос, текст, фото) — я подхвачу и помогу собрать прототип.',
   ];
-  if (tasks.length > 0) {
-    lines.push('', 'Список — /list, текущая — /current.');
-  } else {
-    lines.push('', 'Когда issue получит лейбл `needs-visual-review`, я пришлю уведомление.');
+  await ctx.reply(lines.join('\n'), { reply_markup: kb });
+}
+
+// --- Lead-gen Ф2: раздача лидов ассистентам (карточка + кнопки) ---
+function formatLeadCard(lead) {
+  const lines = [
+    `🎯 <b>${escapeHtml(lead.name || lead.handle)}</b>`,
+    `Ниша: ${escapeHtml(lead.niche)}`,
+  ];
+  if (lead.profile_url) lines.push(`🔗 ${lead.profile_url}`);
+  if (lead.kind === 'fb' || lead.kind === 'fb-id') lines.push('<i>(Facebook-страница — ссылку на Instagram ищи на ней)</i>');
+  lines.push('', 'Взять → написать в ЛС. Ответит — соберём прототип.');
+  return lines.join('\n');
+}
+
+export async function offerLeadCard(ctx) {
+  const chatId = ctx.from.id;
+  const niche = await Leads.getNiche(chatId);
+  if (!niche) {
+    const kb = new InlineKeyboard();
+    Leads.NICHES.forEach(n => kb.text(n, `lead:niche:${n}`).row());
+    await ctx.reply('Выбери нишу, по которой искать лидов:', { reply_markup: kb });
+    return;
   }
-  lines.push('', 'Все команды — /help.');
-  await ctx.reply(lines.join('\n'));
+  const lead = await Leads.offerNext(niche, chatId);
+  if (!lead) {
+    const kb = new InlineKeyboard().text('🔄 Сменить нишу', 'lead:changeniche');
+    await ctx.reply(`В нише «${niche}» свободных лидов сейчас нет. Загляни позже.`, { reply_markup: kb });
+    return;
+  }
+  const kb = new InlineKeyboard()
+    .text('✅ Взять', `lead:take:${lead.key}`)
+    .text('⏭ Пропустить', `lead:skip:${lead.key}`).row()
+    .text('❌ Отклонить', `lead:reject:${lead.key}`);
+  await ctx.reply(formatLeadCard(lead), { reply_markup: kb, parse_mode: 'HTML', disable_web_page_preview: true });
 }
 
 export async function handleHelp(ctx) {
@@ -2178,6 +2207,46 @@ export async function handleCallback(ctx) {
     }
   });
 
+  // Lead-gen Ф2: раздача лидов (next/niche/changeniche/take/skip/reject).
+  if (data.startsWith('lead:')) {
+    const parts = data.split(':');
+    const action = parts[1];
+    const arg = parts.slice(2).join(':');
+    const chatId = ctx.from.id;
+    try {
+      if (action === 'next') { await offerLeadCard(ctx); return; }
+      if (action === 'changeniche') { await Leads.setNiche(chatId, ''); await offerLeadCard(ctx); return; }
+      if (action === 'niche') {
+        if (arg) await Leads.setNiche(chatId, arg);
+        try { await ctx.editMessageText(`Ниша: ${arg} ✓`); } catch {}
+        await offerLeadCard(ctx); return;
+      }
+      if (action === 'take') {
+        const res = await Leads.takeLead(chatId, arg);
+        const nextKb = new InlineKeyboard().text('➡️ Следующий лид', 'lead:next');
+        if (!res.ok) {
+          const msg = res.error === 'already_taken' ? '⚠️ Этого лида уже взяли. Жми «Следующий».' : `⚠️ ${res.error}`;
+          try { await ctx.editMessageText(msg, { reply_markup: nextKb }); } catch {}
+        } else {
+          const l = res.lead;
+          try { await ctx.editMessageText(`✅ Взят: <b>${escapeHtml(l.name || l.handle)}</b>\n🔗 ${l.profile_url || ''}\n\nНапиши ему в ЛС. Когда написал — жми «Следующий».`, { parse_mode: 'HTML', disable_web_page_preview: true, reply_markup: nextKb }); } catch {}
+        }
+        return;
+      }
+      if (action === 'skip') {
+        await Leads.skipLead(chatId, arg);
+        try { await ctx.editMessageText('⏭ Пропущен (предложу снова через неделю).'); } catch {}
+        await offerLeadCard(ctx); return;
+      }
+      if (action === 'reject') {
+        await setCommandPending(chatId, { command: 'lead_reject', extras: { key: arg } });
+        try { await ctx.editMessageText('❌ Напиши причину отклонения одним сообщением.'); } catch {}
+        return;
+      }
+    } catch (e) { console.error('[lead callback] failed:', e.message); }
+    return;
+  }
+
   // Owner-only: approve/reject pending access request from an unknown chat.
   // Callback data shape: `access:approve:<chatId>` / `access:reject:<chatId>`.
   if (data.startsWith('access:')) {
@@ -3354,6 +3423,11 @@ export async function handleText(ctx) {
         return;
       case 'prompt_reject':
         await processPromptRejectInput(ctx, text, Number(pending.extras?.issueNumber));
+        return;
+      case 'lead_reject':
+        await Leads.rejectLead(ctx.from.id, pending.extras?.key, text);
+        await ctx.reply('❌ Лид отклонён, причина учтена.');
+        await offerLeadCard(ctx);
         return;
       default: break; // unknown pending → fall through
     }

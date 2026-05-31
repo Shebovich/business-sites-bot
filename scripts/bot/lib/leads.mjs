@@ -159,3 +159,8 @@ export async function poolStats(niche = null) {
   const total = await r().scard('leads:all');
   return { total_leads: total };
 }
+
+// --- Ниша ассистента (MVP; полноценный интервью-онбординг — позже, Ф2.1) ---
+export const NICHES = ['матрасы', 'натяжные потолки'];
+export async function setNiche(chatId, niche) { await r().set(`assistant:niche:${chatId}`, String(niche || '')); }
+export async function getNiche(chatId) { const v = await r().get(`assistant:niche:${chatId}`); return v || null; }
