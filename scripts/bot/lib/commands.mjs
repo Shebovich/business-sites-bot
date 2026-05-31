@@ -109,19 +109,30 @@ function formatLeadCard(lead) {
   return lines.join('\n');
 }
 
+const isHttpUrl = (u) => /^https?:\/\/\S+$/i.test(String(u || ''));
+
 export async function offerLeadCard(ctx) {
-  const lead = await Leads.offerAny(ctx.from.id); // #122 — без выбора ниши, просто следующий
+  let lead;
+  try { lead = await Leads.offerAny(ctx.from.id); } // #122 — без выбора ниши, просто следующий
+  catch (e) { console.error('[offerLeadCard offerAny]:', e.message); await ctx.reply('⚠️ Не смог достать лида, попробуй ещё раз.').catch(() => {}); return; }
   if (!lead) {
     await ctx.reply('Свободных лидов сейчас нет — все разобраны. Загляни позже или предложи своего (➕).');
     return;
   }
   const kb = new InlineKeyboard();
-  if (lead.contact_url) kb.url('✉️ Написать в директ', lead.contact_url).row(); // #128 — сразу в ЛС
+  if (isHttpUrl(lead.contact_url)) kb.url('✉️ Написать в директ', lead.contact_url).row(); // #128, валидный URL обязателен
   // #133 — «Написал в ЛС» сразу закрепляет лид (меньше шагов: take+contacted одним кликом)
   kb.text('✍️ Написал в ЛС', `lead:take:${lead.key}`)
     .text('⏭ Пропустить', `lead:skip:${lead.key}`).row()
     .text('❌ Отклонить', `lead:reject:${lead.key}`);
-  await ctx.reply(formatLeadCard(lead), { reply_markup: kb, parse_mode: 'HTML', disable_web_page_preview: true });
+  try {
+    await ctx.reply(formatLeadCard(lead), { reply_markup: kb, parse_mode: 'HTML', disable_web_page_preview: true });
+  } catch (e) {
+    // не дать карточке молча упасть (битый HTML/URL) — шлём упрощённый план-текст
+    console.error('[offerLeadCard reply]:', e.message);
+    const plain = `🎯 ${lead.name || lead.handle}\nНиша: ${lead.niche}\n\n${outreachMessage(lead)}`;
+    await ctx.reply(plain, { reply_markup: kb }).catch((e2) => console.error('[offerLeadCard fallback]:', e2.message));
+  }
 }
 
 // Lead-gen nudge — единый ответ ассистенту в «свободном режиме» (вне сборки прототипа).
