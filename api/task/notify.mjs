@@ -54,8 +54,12 @@ export default async function handler(req, res) {
       const item = typeof req.body === 'string' ? JSON.parse(req.body) : (req.body || {});
       const r = await Attn.addItem(item);
       if (r.deduped) { res.status(200).json({ ok: true, deduped: true }); return; }
-      if (r.rec && r.rec.priority === 'urgent') {
-        await sendMessage(OWNER_ID, `🔔 <b>Срочно</b>\n\n${Attn.itemText(r.rec)}`, { parse_mode: 'HTML', disable_web_page_preview: true, reply_markup: Attn.itemKeyboard(r.rec) });
+      // Сразу пушим owner'у: срочное + всё, что требует ЕГО решения (рекомендации ассистентов,
+      // эскалации, запросы доступа). Только инфо/аномалии копятся в сводку, чтоб не спамить (#152).
+      const pushNow = r.rec && (r.rec.priority === 'urgent' || ['recommendation', 'escalation', 'access'].includes(r.rec.type));
+      if (pushNow) {
+        const head = r.rec.priority === 'urgent' ? '🔔 <b>Срочно</b>' : '📥 <b>На твоё решение</b>';
+        await sendMessage(OWNER_ID, `${head}\n\n${Attn.itemText(r.rec)}`, { parse_mode: 'HTML', disable_web_page_preview: true, reply_markup: Attn.itemKeyboard(r.rec) });
         if (r.rec.voice_file_id) { try { const { tgApi } = await import('../../scripts/bot/lib/tg-api.mjs'); await tgApi('sendVoice', { chat_id: OWNER_ID, voice: r.rec.voice_file_id, caption: '🎤 оригинал от ассистента' }); } catch (e) { console.warn('[attn voice]', e.message); } }
       }
       res.status(200).json({ ok: true, id: r.id }); return;
