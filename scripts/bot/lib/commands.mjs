@@ -107,6 +107,24 @@ export async function offerLeadCard(ctx) {
   await ctx.reply(formatLeadCard(lead), { reply_markup: kb, parse_mode: 'HTML', disable_web_page_preview: true });
 }
 
+// Lead-gen nudge — единый ответ ассистенту в «свободном режиме» (вне сборки прототипа).
+// Заменяет ВСЁ легаси старой версии бота (/list, /scout, секции, intent-router и т.п.).
+function assistantNudge() {
+  return (
+    '🙂 Я бот для лидов. Вот что можно:\n\n' +
+    '🎯 <b>Получить лида</b> — дам бизнес, которому можно написать.\n' +
+    '📋 <b>Мои лиды</b> — твои текущие. Лид ответил → открой его → «🔨 Собрать прототип», и тогда говори/пиши мне, что нужно.\n' +
+    '➕ <b>Предложить своего</b> — скинь @ник или ссылку.\n\n' +
+    'Кнопки пропали — нажми /start.'
+  );
+}
+async function assistantNudgeReply(ctx) {
+  const kb = new InlineKeyboard()
+    .text('🎯 Получить лида', 'lead:next').row()
+    .text('📋 Мои лиды', 'lead:myleads');
+  await ctx.reply(assistantNudge(), { parse_mode: 'HTML', reply_markup: kb });
+}
+
 // @ника / ссылка → handle
 function parseHandle(s) {
   s = String(s || '').trim();
@@ -3338,24 +3356,16 @@ export async function handlePhoto(ctx) {
     return;
   }
 
+  // Assistant вне сборки прототипа → nudge (легаси photo-section/intent убран, #135).
+  if (ctx.role === 'assistant') {
+    await ctx.reply('📷 Фото пригодится, когда соберёшь прототип. Открой «📋 Мои лиды» → нужный лид → «🔨 Собрать прототип», и тогда шли фото — я добавлю на сайт.');
+    return;
+  }
+
   const task = await getCurrentTask(ctx.from.id);
   const sectionId = await getActiveSection(ctx.from.id);
   if (!task || !sectionId) {
-    // Intent router intake — photo without active task/section.
-    if (!task) {
-      const sizes = ctx.message.photo;
-      const largest = sizes[sizes.length - 1];
-      const caption = ctx.message.caption || '';
-      const intake = await intakeAssistantInput(ctx, {
-        text: caption,
-        media: { type: 'photo', file_id: largest.file_id, caption },
-      });
-      if (intake.handled) {
-        if (intake.replyText) await ctx.reply(intake.replyText);
-        return;
-      }
-    }
-    await ctx.reply('Сначала открой задачу (/current) и выбери секцию.');
+    await ctx.reply('📷 Фото пригодится при сборке прототипа лида.');
     return;
   }
   const sizes = ctx.message.photo;
@@ -3516,19 +3526,8 @@ export async function handleVoice(ctx) {
     return;
   }
 
-  // Assistant path: intent router intake (unchanged).
-  const intake = await intakeAssistantInput(ctx, {
-    text: transcript,
-    media: { type: 'voice', file_id: fileId, caption: '' },
-  });
-  if (intake.handled) {
-    const replyParts = [`🎤 Расшифровка: «${preview}»`];
-    if (intake.replyText) replyParts.push('', intake.replyText);
-    await ctx.reply(replyParts.join('\n'));
-  } else {
-    // Assistant role but intent router disabled OR active task present.
-    await ctx.reply(`🎤 Расшифровка: «${preview}»\n\n(Голосовые работают только в свободном режиме. Закрой активную задачу через /cancel или напиши текстом для специфичной команды.)`);
-  }
+  // Assistant вне сборки прототипа → nudge (легаси intent-router убран, #135).
+  await assistantNudgeReply(ctx);
 }
 
 // Documents (PDFs, .md, любые file uploads) идут в /bug или /prompt session
@@ -3668,6 +3667,9 @@ export async function handleText(ctx) {
   // Build-mode (Ф3): человек собирает прототип лида — все сообщения идут в CC.
   if (await maybeRouteBuild(ctx, { text })) return;
 
+  // Lead-gen bot: ассистент вне сборки → единый nudge. Никакого легаси (#135).
+  if (ctx.role === 'assistant') { await assistantNudgeReply(ctx); return; }
+
   // Interview answer priority — если chat сейчас отвечает на интервью, любой
   // free-form текст идёт в текущий вопрос. /cancel_interview прерывает.
   const waitingSessionId = await getInterviewWaitingForChat(ctx.from.id).catch(() => null);
@@ -3791,14 +3793,8 @@ export async function handleText(ctx) {
       return;
     }
 
-    // Assistant path: intent router intake (Q2 locked: current task wins → only fires в idle).
-    const intake = await intakeAssistantInput(ctx, { text });
-    if (intake.handled) {
-      if (intake.replyText) await ctx.reply(intake.replyText);
-      return;
-    }
-    // Assistant in idle but intent router disabled — old fallback.
-    await ctx.reply('Открой задачу через /list — тогда я сохраню текст как заметку.');
+    // Прочие роли (unknown) — направляем на /start (там онбординг/запрос доступа).
+    await ctx.reply('Привет! Нажми /start, чтобы начать.');
     return;
   }
 
