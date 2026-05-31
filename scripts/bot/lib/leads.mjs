@@ -32,8 +32,9 @@ async function logEvent(action, ownerId, key, extra = {}) {
 }
 // События за последние N часов, опционально по владельцу.
 export async function eventsSince(sinceMs, ownerId = null) {
-  const raw = await r().zrange('leads:events', sinceMs, '+inf', { byScore: true });
-  const evs = (raw || []).map((s) => { try { return JSON.parse(s); } catch { return null; } }).filter(Boolean);
+  // числовая верхняя граница (некоторые клиенты не парсят '+inf' в byScore)
+  const raw = await r().zrange('leads:events', sinceMs, 99999999999999, { byScore: true });
+  const evs = (raw || []).map((s) => { try { return typeof s === 'string' ? JSON.parse(s) : s; } catch { return null; } }).filter(Boolean);
   return ownerId ? evs.filter((e) => e.who === String(ownerId)) : evs;
 }
 
