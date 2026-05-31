@@ -47,11 +47,15 @@ export default async function handler(req, res) {
       if (typeof body === 'string') body = JSON.parse(body);
       const list = (body && body.leads) || [];
       const seeded = await L.seedLeads(list.map((l) => ({ ...l, source: 'adlib' })));
-      const niches = [...new Set(list.map((x) => x.niche))];
-      const pools = {};
-      for (const n of niches) pools[n] = await L.poolStats(n);
+      // backfill глобального пула leads:available из всех нишевых пулов (для лидов, засеянных до #122)
+      const { getRedis } = await import('../../scripts/bot/lib/state.mjs');
+      const r2 = getRedis();
+      const poolKeys = await r2.keys('leads:pool:*');
+      let backfilled = 0;
+      for (const pk of poolKeys) { if (pk.includes('__test__')) continue; const m = await r2.smembers(pk); if (m && m.length) { await r2.sadd('leads:available', ...m); backfilled += m.length; } }
+      const available = await r2.scard('leads:available');
       res.statusCode = 200; res.setHeader('content-type', 'application/json');
-      res.end(JSON.stringify({ ok: true, seeded, pools }, null, 2)); return;
+      res.end(JSON.stringify({ ok: true, seeded, backfilled, available }, null, 2)); return;
     } catch (e) { res.statusCode = 500; res.end(JSON.stringify({ ok: false, error: e.message })); return; }
   }
 

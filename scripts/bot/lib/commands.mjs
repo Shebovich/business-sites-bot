@@ -52,13 +52,30 @@ const STUB_M2 = 'Эта команда появится в M2. Сейчас до
 // ---- M1 real handlers ----------------------------------------------------
 
 export async function handleStart(ctx) {
-  const kb = new InlineKeyboard().text('🎯 Получить лида', 'lead:next');
+  const kb = new InlineKeyboard()
+    .text('🎯 Получить лида', 'lead:next').row()
+    .text('➕ Предложить своего', 'lead:suggest').row()
+    .text('📋 Мои лиды', 'lead:myleads');
   const lines = [
-    '👋 Привет! Я бот агентства Shebovich.',
+    '👋 Привет! Ты в команде Shebovich. Мы делаем сайты бизнесам, которые уже тратят деньги на рекламу, и берём за это оплату. Твоя задача — находить таких и доводить до готового сайта. Всю техническую работу делаю я, бот. Объясню по порядку, простыми словами:',
     '',
-    'Жми кнопку — получишь лида в работу. Дальше просто пиши/говори мне (голос, текст, фото) — я подхвачу и помогу собрать прототип.',
+    '🎯 <b>Лиды (это твои потенциальные клиенты)</b>',
+    '• «Получить лида» — я даю тебе бизнес, который уже крутит рекламу (значит, у него есть бюджет и желание продавать).',
+    '• «Предложить своего» — если сам нашёл подходящий бизнес, скинь мне его @ник или ссылку.',
+    '• Один лид достаётся одному человеку: если ты или кто-то его уже взял — другим он не выпадет.',
+    '',
+    '✉️ <b>Первый контакт</b>',
+    'Взял лида — напиши ему в личку: «Сделаю прототип вашего сайта за пару дней бесплатно. Не понравится — отстану. Понравится — отдам за $100». Отметь «Написал в ЛС» и бери следующего. Лид может ответить не сразу — это нормально.',
+    '',
+    '🔨 <b>Сборка сайта — это делаю я</b>',
+    'Лид ответил — заходи в «Мои лиды» → «Собрать прототип». Дальше просто <b>говори или пиши мне</b> (голос, текст, фото), что нужно — я соберу настоящий сайт и пришлю ссылку. Захочешь что-то поправить — просто скажи, я переделаю. Тебе не нужно ничего уметь технически.',
+    '',
+    '👀 <b>Ревью и отправка</b>',
+    'Когда доволен прототипом — жми «Готово». Я отправлю его на проверку Pavel\'у. Он одобрит — и ты отправляешь ссылку лиду. Понравится клиенту — сделка засчитана.',
+    '',
+    'Со мной можно общаться как с человеком — голосом, текстом, фотками. Я пойму. Поехали 👇',
   ];
-  await ctx.reply(lines.join('\n'), { reply_markup: kb });
+  await ctx.reply(lines.join('\n'), { reply_markup: kb, parse_mode: 'HTML' });
 }
 
 // --- Lead-gen Ф2: раздача лидов ассистентам (карточка + кнопки) ---
@@ -74,18 +91,9 @@ function formatLeadCard(lead) {
 }
 
 export async function offerLeadCard(ctx) {
-  const chatId = ctx.from.id;
-  const niche = await Leads.getNiche(chatId);
-  if (!niche) {
-    const kb = new InlineKeyboard();
-    Leads.NICHES.forEach(n => kb.text(n, `lead:niche:${n}`).row());
-    await ctx.reply('Выбери нишу, по которой искать лидов:', { reply_markup: kb });
-    return;
-  }
-  const lead = await Leads.offerNext(niche, chatId);
+  const lead = await Leads.offerAny(ctx.from.id); // #122 — без выбора ниши, просто следующий
   if (!lead) {
-    const kb = new InlineKeyboard().text('🔄 Сменить нишу', 'lead:changeniche');
-    await ctx.reply(`В нише «${niche}» свободных лидов сейчас нет. Загляни позже.`, { reply_markup: kb });
+    await ctx.reply('Свободных лидов сейчас нет — все разобраны. Загляни позже или предложи своего (➕).');
     return;
   }
   const kb = new InlineKeyboard()
@@ -93,6 +101,67 @@ export async function offerLeadCard(ctx) {
     .text('⏭ Пропустить', `lead:skip:${lead.key}`).row()
     .text('❌ Отклонить', `lead:reject:${lead.key}`);
   await ctx.reply(formatLeadCard(lead), { reply_markup: kb, parse_mode: 'HTML', disable_web_page_preview: true });
+}
+
+// @ника / ссылка → handle
+function parseHandle(s) {
+  s = String(s || '').trim();
+  let m = s.match(/(?:instagram\.com|facebook\.com)\/([A-Za-z0-9_.]+)/i);
+  if (m) return m[1];
+  m = s.match(/@?([A-Za-z0-9_.]{2,40})/);
+  return m ? m[1] : null;
+}
+
+// Если человек в build-mode (собирает прототип лида) — все его сообщения → CC (Ф3).
+async function maybeRouteBuild(ctx, content) {
+  const key = await Leads.getBuilding(ctx.from.id).catch(() => null);
+  if (!key) return false;
+  try { await createLeadBuildIssue(ctx, key, content); }
+  catch (e) { console.error('[build route]:', e.message); await ctx.reply('⚠️ Не смог передать в сборку: ' + e.message); }
+  return true;
+}
+
+const LEAD_STATUS_EMOJI = { taken: '📥', contacted: '✉️', 'in-build': '🔨', ready: '🕓', 'owner-review': '👀', pitched: '🚀', sold: '💰', lost: '✖️' };
+
+// Список взятых лидов ассистента + действия по каждому.
+export async function renderMyLeads(ctx) {
+  const leads = await Leads.listByOwner(ctx.from.id);
+  const active = leads.filter((l) => !['rejected', 'skipped', 'sold', 'lost'].includes(l.status));
+  if (!active.length) { await ctx.reply('У тебя пока нет взятых лидов. Жми «🎯 Получить лида».'); return; }
+  const kb = new InlineKeyboard();
+  for (const l of active.slice(0, 25)) {
+    kb.text(`${LEAD_STATUS_EMOJI[l.status] || '•'} ${l.name || l.handle} · ${l.status}`, `lead:open:${l.key}`).row();
+  }
+  await ctx.reply('Твои лиды:', { reply_markup: kb });
+}
+
+// Карточка взятого лида с действиями.
+async function renderLeadActions(ctx, key) {
+  const l = await Leads.getLead(key);
+  if (!l) { await ctx.reply('Лид не найден.'); return; }
+  const lines = [`<b>${escapeHtml(l.name || l.handle)}</b>`, `Статус: ${l.status}`];
+  if (l.profile_url) lines.push(`🔗 ${l.profile_url}`);
+  const kb = new InlineKeyboard();
+  if (l.status === 'taken') kb.text('✉️ Написал в ЛС', `lead:contacted:${key}`).row();
+  kb.text('🔨 Собрать прототип', `lead:build:${key}`).row();
+  await ctx.reply(lines.join('\n'), { reply_markup: kb, parse_mode: 'HTML', disable_web_page_preview: true });
+}
+
+// Создать [lead-build] issue → CC соберёт/правит прототип лида и ответит ассистенту.
+async function createLeadBuildIssue(ctx, key, content) {
+  const l = await Leads.getLead(key);
+  const name = (l && (l.name || l.handle)) || key;
+  const { createIssue } = await import('./github-api.mjs');
+  const reqText = content.text || (content.fileId ? `(медиа: ${content.kind})` : '(старт сборки)');
+  const body =
+    `<!-- lead-build-v1 -->\nfrom_chat: ${ctx.from.id}\nlead_key: ${key}\nlead_name: ${name}\n` +
+    `lead_url: ${(l && l.profile_url) || ''}\nlead_niche: ${(l && l.niche) || ''}\n` +
+    (content.fileId ? `file_id: ${content.fileId}\n` : '') +
+    `<!-- /lead-build-v1 -->\n\n## Запрос\n\n${reqText}\n\n---\n\n` +
+    `CC: lead-gen сборка прототипа для лида «${name}» (${(l && l.profile_url) || ''}, ниша ${(l && l.niche) || ''}). ` +
+    `Исследуй лид (IG/сайт), собери/правь прототип, задеплой, relay reply ассистенту (from_chat). ` +
+    (content.fileId ? `Фото/медиа: /api/bug/media?file_id=${content.fileId}.` : '');
+  return await createIssue({ title: `[lead-build] ${name}: ${String(reqText).slice(0, 50)}`, body, labels: ['prompt'] });
 }
 
 export async function handleHelp(ctx) {
@@ -2215,6 +2284,12 @@ export async function handleCallback(ctx) {
     const chatId = ctx.from.id;
     try {
       if (action === 'next') { await offerLeadCard(ctx); return; }
+      if (action === 'suggest') {
+        await setCommandPending(chatId, { command: 'lead_suggest' });
+        try { await ctx.editMessageText('➕ Скинь @ника или ссылку на лида (Instagram или Facebook) — добавлю в работу за тобой.'); }
+        catch { await ctx.reply('➕ Скинь @ника или ссылку на лида.'); }
+        return;
+      }
       if (action === 'changeniche') { await Leads.setNiche(chatId, ''); await offerLeadCard(ctx); return; }
       if (action === 'niche') {
         if (arg) await Leads.setNiche(chatId, arg);
@@ -2243,7 +2318,55 @@ export async function handleCallback(ctx) {
         try { await ctx.editMessageText('❌ Напиши причину отклонения одним сообщением.'); } catch {}
         return;
       }
+      if (action === 'myleads') { await renderMyLeads(ctx); return; }
+      if (action === 'open') { await renderLeadActions(ctx, arg); return; }
+      if (action === 'contacted') {
+        await Leads.setStatus(arg, 'contacted', chatId);
+        try { await ctx.editMessageText('✉️ Отмечено: написал в ЛС. Когда лид ответит — «Мои лиды» → Собрать прототип.'); } catch {}
+        return;
+      }
+      if (action === 'build') {
+        await Leads.setBuilding(chatId, arg);
+        await Leads.setStatus(arg, 'in-build', chatId);
+        try { await createLeadBuildIssue(ctx, arg, { text: 'старт сборки прототипа' }); } catch (e) { console.error('[lead build start]:', e.message); }
+        const l = await Leads.getLead(arg);
+        const kb = new InlineKeyboard().text('✅ Готово — на ревью', `lead:builddone:${arg}`);
+        try { await ctx.editMessageText(`🔨 Собираем прототип для «${escapeHtml((l && (l.name || l.handle)) || arg)}».\n\nПиши / говори / шли фото — соберу и пришлю ссылку. Когда всё готово — жми «Готово».`, { parse_mode: 'HTML', reply_markup: kb }); } catch {}
+        return;
+      }
+      if (action === 'builddone') {
+        await Leads.clearBuilding(chatId);
+        await Leads.setStatus(arg, 'owner-review', chatId);
+        try { await ctx.editMessageText('✅ Отправил прототип на ревью Pavel\'у. Жди — approve или правки.'); } catch {}
+        try {
+          const l = await Leads.getLead(arg);
+          const OWNER = (process.env.TG_OWNER_CHAT_ID || '').replace(/^﻿/, '').trim();
+          if (OWNER) {
+            const kb = new InlineKeyboard().text('✅ Approve', `leadreview:approve:${arg}`).text('✏️ Правки', `leadreview:fix:${arg}`);
+            await ctx.api.sendMessage(OWNER, `👀 Прототип на ревью\nЛид: ${(l && (l.name || l.handle)) || arg}\nОт ассистента: ${chatId}`, { reply_markup: kb }).catch(() => {});
+          }
+        } catch (e) { console.error('[builddone notify]:', e.message); }
+        return;
+      }
     } catch (e) { console.error('[lead callback] failed:', e.message); }
+    return;
+  }
+
+  // Owner review прототипа лида (Ф3): approve / правки.
+  if (data.startsWith('leadreview:')) {
+    if (ctx.role !== 'owner') return;
+    const [, action, key] = data.split(':');
+    try {
+      const l = await Leads.getLead(key);
+      if (action === 'approve') {
+        await Leads.setStatus(key, 'approved', ctx.from.id);
+        try { await ctx.editMessageText(`✅ Approved: ${(l && (l.name || l.handle)) || key}`); } catch {}
+        if (l && l.owner) await ctx.api.sendMessage(l.owner, `✅ Pavel одобрил прототип для «${(l && (l.name || l.handle)) || key}». Можешь отправлять лиду.`).catch(() => {});
+      } else if (action === 'fix') {
+        await setCommandPending(ctx.from.id, { command: 'leadreview_fix', extras: { key } });
+        try { await ctx.editMessageText('✏️ Напиши, что поправить — передам ассистенту.'); } catch {}
+      }
+    } catch (e) { console.error('[leadreview]:', e.message); }
     return;
   }
 
@@ -3118,6 +3241,9 @@ export async function handlePhoto(ctx) {
     return;
   }
 
+  // Build-mode (Ф3): сборка прототипа лида — фото → CC.
+  if (await maybeRouteBuild(ctx, { fileId: ctx.message.photo[ctx.message.photo.length - 1].file_id, kind: 'photo', text: (ctx.message.caption || '').trim() })) return;
+
   // Owner path: фото без активной задачи → prompt issue с file_id для CC
   // (симметрия с handleVoice/handleText owner path). CC читает картинку через
   // /api/bug/media и реагирует — НЕ загоняем owner'а в assistant photo-section flow.
@@ -3295,6 +3421,9 @@ export async function handleVoice(ctx) {
 
   const preview = transcript.length > 200 ? transcript.slice(0, 200) + '…' : transcript;
 
+  // Build-mode (Ф3): сборка прототипа лида — voice → CC.
+  if (await maybeRouteBuild(ctx, { text: transcript })) return;
+
   // Owner path: voice не идёт в intent router. Создаём prompt issue
   // напрямую → CC reactive подхватит и ответит через relay endpoint.
   // NO «Расшифровываю...» NO «Расшифровка: ...» — Pavel feedback: молча
@@ -3424,6 +3553,22 @@ export async function handleText(ctx) {
       case 'prompt_reject':
         await processPromptRejectInput(ctx, text, Number(pending.extras?.issueNumber));
         return;
+      case 'lead_suggest': {
+        const handle = parseHandle(text);
+        if (!handle) { await ctx.reply('Не понял ника. Пришли @ника или ссылку на Instagram/Facebook.'); return; }
+        const up = await Leads.upsertLead({ handle, name: '', kind: /instagram/i.test(text) ? 'ig' : 'fb', profile_url: text.trim(), niche: 'свой', source: 'assistant' });
+        if (up.dup) { await ctx.reply('Этот лид уже в системе — кто-то его ведёт. Пришли другого.'); return; }
+        await Leads.takeLead(ctx.from.id, up.key);
+        await ctx.reply(`✅ Добавил и закрепил за тобой: ${escapeHtml(handle)}. Напиши ему в ЛС. Когда ответит — «Мои лиды» → 🔨 Собрать прототип.`, { parse_mode: 'HTML' });
+        return;
+      }
+      case 'leadreview_fix': {
+        const k = pending.extras?.key;
+        const l = await Leads.getLead(k);
+        if (l && l.owner) { await Leads.setStatus(k, 'in-build', l.owner); await ctx.api.sendMessage(l.owner, `✏️ Pavel просит поправить прототип «${l.name || l.handle}»:\n\n${text}\n\n«Мои лиды» → 🔨 Собрать прототип и доработай.`).catch(() => {}); }
+        await ctx.reply('Передал правки ассистенту.');
+        return;
+      }
       case 'lead_reject':
         await Leads.rejectLead(ctx.from.id, pending.extras?.key, text);
         await ctx.reply('❌ Лид отклонён, причина учтена.');
@@ -3432,6 +3577,9 @@ export async function handleText(ctx) {
       default: break; // unknown pending → fall through
     }
   }
+
+  // Build-mode (Ф3): человек собирает прототип лида — все сообщения идут в CC.
+  if (await maybeRouteBuild(ctx, { text })) return;
 
   // Interview answer priority — если chat сейчас отвечает на интервью, любой
   // free-form текст идёт в текущий вопрос. /cancel_interview прерывает.

@@ -51,6 +51,7 @@ export async function upsertLead(lead) {
   };
   await r().set(`lead:${key}`, rec);
   await r().sadd(poolKey(niche), key);
+  await r().sadd('leads:available', key); // глобальный пул — выдаём лида без выбора ниши (#122)
   return { added: true, key };
 }
 
@@ -70,13 +71,21 @@ export async function offerNext(niche, ownerId) {
   return await getLead(key);
 }
 
+// Предложить ЛЮБОГО свободного лида (без выбора ниши, #122).
+export async function offerAny(ownerId) {
+  const key = await r().srandmember('leads:available');
+  if (!key) return null;
+  return await getLead(key);
+}
+
 // Атомарный захват. SREM из пула возвращает 1 только первому → коллизий нет.
 export async function takeLead(ownerId, key) {
   key = normKey(key);
   const rec = await getLead(key);
   if (!rec) return { ok: false, error: 'not_found' };
-  const removed = await r().srem(poolKey(rec.niche), key);
+  const removed = await r().srem('leads:available', key); // атомарный захват из глобального пула
   if (removed === 0) return { ok: false, error: 'already_taken', by: rec.owner };
+  await r().srem(poolKey(rec.niche), key);
   rec.owner = String(ownerId);
   rec.status = 'taken';
   rec.taken_at = now();
@@ -92,6 +101,7 @@ export async function skipLead(ownerId, key) {
   const rec = await getLead(key);
   if (!rec) return { ok: false, error: 'not_found' };
   await r().srem(poolKey(rec.niche), key);
+  await r().srem('leads:available', key);
   const reAt = now() + SKIP_COOLDOWN_MS;
   await r().zadd('leads:reoffer', { score: reAt, member: `${ownerId}::${key}` });
   rec.status = 'skipped';
@@ -108,6 +118,7 @@ export async function rejectLead(ownerId, key, reason = '') {
   const rec = await getLead(key);
   if (!rec) return { ok: false, error: 'not_found' };
   await r().srem(poolKey(rec.niche), key);
+  await r().srem('leads:available', key);
   rec.status = 'rejected';
   rec.reject_reason = String(reason);
   rec.rejected_by = String(ownerId);
@@ -140,6 +151,7 @@ export async function releaseCooldowns() {
       rec.history.push({ s: 'reoffered', at: now() });
       await saveLead(rec);
       await r().sadd(poolKey(rec.niche), key);
+      await r().sadd('leads:available', key);
       released++;
     }
     await r().zrem('leads:reoffer', member);
@@ -164,3 +176,9 @@ export async function poolStats(niche = null) {
 export const NICHES = ['матрасы', 'натяжные потолки'];
 export async function setNiche(chatId, niche) { await r().set(`assistant:niche:${chatId}`, String(niche || '')); }
 export async function getNiche(chatId) { const v = await r().get(`assistant:niche:${chatId}`); return v || null; }
+
+// --- Build-mode (Ф3): какой лид человек сейчас собирает через CC ---
+// Пока set — все его сообщения (голос/текст/фото) идут в CC как [lead-build] этого лида.
+export async function setBuilding(chatId, key) { await r().set(`lead:building:${chatId}`, normKey(key)); }
+export async function getBuilding(chatId) { const v = await r().get(`lead:building:${chatId}`); return v || null; }
+export async function clearBuilding(chatId) { await r().del(`lead:building:${chatId}`); }
