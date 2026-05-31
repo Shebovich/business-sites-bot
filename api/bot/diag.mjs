@@ -95,6 +95,27 @@ export default async function handler(req, res) {
     } catch (e) { res.statusCode = 500; res.end(JSON.stringify({ ok: false, error: e.message })); return; }
   }
 
+  // ?poolstats=1 — сводка по пулу лидов: всего, по статусам, по нишам, доступно. Gated.
+  if (req.url?.includes('poolstats=1')) {
+    const SECRET = (process.env.CLAUDE_NOTIFY_SECRET || '').trim();
+    if (req.headers['x-notify-secret'] !== SECRET) { res.statusCode = 401; res.end(JSON.stringify({ ok: false, error: 'unauthorized' })); return; }
+    try {
+      const { getRedis } = await import('../../scripts/bot/lib/state.mjs');
+      const r2 = getRedis();
+      const keys = (await r2.smembers('leads:all')) || [];
+      const byStatus = {}, byNiche = {}; let withSite = 0;
+      for (const k of keys) {
+        const l = await r2.get(`lead:${k}`); if (!l) continue;
+        byStatus[l.status || 'new'] = (byStatus[l.status || 'new'] || 0) + 1;
+        byNiche[l.niche || '—'] = (byNiche[l.niche || '—'] || 0) + 1;
+        if (l.has_site) withSite++;
+      }
+      const available = await r2.scard('leads:available');
+      res.statusCode = 200; res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({ ok: true, total: keys.length, available, withSite, byStatus, byNiche }, null, 2)); return;
+    } catch (e) { res.statusCode = 500; res.end(JSON.stringify({ ok: false, error: e.message })); return; }
+  }
+
   // Identify bot via getMe so мы знаем КАКОМУ именно боту owner должен писать /start.
   let botInfo = null;
   let getMeError = null;
