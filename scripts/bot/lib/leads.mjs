@@ -22,6 +22,21 @@ const SKIP_COOLDOWN_MS = 7 * 24 * 60 * 60 * 1000; // 7 дней
 
 export const normKey = (handle) => String(handle || '').toLowerCase().replace(/^@/, '').trim();
 
+// Журнал событий (#186) — намертво фиксирует каждое действие (take/contact/reject),
+// переживает любые пересборки пула. ZSET по времени, member = JSON. Источник дневных отчётов.
+async function logEvent(action, ownerId, key, extra = {}) {
+  try {
+    const ev = JSON.stringify({ action, who: String(ownerId), key, ...extra, ts: now() });
+    await r().zadd('leads:events', { score: now(), member: ev });
+  } catch {}
+}
+// События за последние N часов, опционально по владельцу.
+export async function eventsSince(sinceMs, ownerId = null) {
+  const raw = await r().zrange('leads:events', sinceMs, '+inf', { byScore: true });
+  const evs = (raw || []).map((s) => { try { return JSON.parse(s); } catch { return null; } }).filter(Boolean);
+  return ownerId ? evs.filter((e) => e.who === String(ownerId)) : evs;
+}
+
 const poolKey = (niche) => `leads:pool:${String(niche || 'misc').toLowerCase()}`;
 const ownerKey = (ownerId) => `leads:owner:${ownerId}`;
 
@@ -94,6 +109,7 @@ export async function takeLead(ownerId, key) {
   rec.history.push({ s: 'taken', by: String(ownerId), at: now() });
   await saveLead(rec);
   await r().sadd(ownerKey(ownerId), key);
+  await logEvent('take', ownerId, key, { name: rec.name || rec.handle });
   return { ok: true, lead: rec };
 }
 
@@ -126,6 +142,7 @@ export async function rejectLead(ownerId, key, reason = '') {
   rec.rejected_by = String(ownerId);
   rec.history.push({ s: 'rejected', by: String(ownerId), reason: String(reason), at: now() });
   await saveLead(rec);
+  await logEvent('reject', ownerId, key, { name: rec.name || rec.handle, reason: String(reason) });
   return { ok: true };
 }
 
@@ -137,6 +154,7 @@ export async function setStatus(key, status, by = null) {
   rec.status = status;
   rec.history.push({ s: status, by: by ? String(by) : undefined, at: now() });
   await saveLead(rec);
+  if (['contacted', 'in-build', 'owner-review', 'approved', 'sold'].includes(status)) await logEvent(status, by || rec.owner, key, { name: rec.name || rec.handle });
   return { ok: true, lead: rec };
 }
 

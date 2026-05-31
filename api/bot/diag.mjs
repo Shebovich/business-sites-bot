@@ -128,6 +128,23 @@ export default async function handler(req, res) {
     } catch (e) { res.statusCode = 500; res.end(JSON.stringify({ ok: false, error: e.message })); return; }
   }
 
+  // ?dayreport=1 — сводка событий за сегодня (с полуночи по Минску) по действиям и людям. Gated.
+  if (req.url?.includes('dayreport=1')) {
+    const SECRET = (process.env.CLAUDE_NOTIFY_SECRET || '').trim();
+    if (req.headers['x-notify-secret'] !== SECRET) { res.statusCode = 401; res.end(JSON.stringify({ ok: false, error: 'unauthorized' })); return; }
+    try {
+      const L = await import('../../scripts/bot/lib/leads.mjs');
+      const nowMs = Date.now();
+      const minskNow = new Date(nowMs + 3 * 3600 * 1000); // UTC+3
+      const midnightMinsk = nowMs - ((minskNow.getUTCHours() * 3600 + minskNow.getUTCMinutes() * 60 + minskNow.getUTCSeconds()) * 1000);
+      const evs = await L.eventsSince(midnightMinsk);
+      const byAction = {}, byWho = {};
+      for (const e of evs) { byAction[e.action] = (byAction[e.action] || 0) + 1; byWho[e.who] = byWho[e.who] || {}; byWho[e.who][e.action] = (byWho[e.who][e.action] || 0) + 1; }
+      res.statusCode = 200; res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({ ok: true, since: 'midnight-minsk', total_events: evs.length, byAction, byWho }, null, 2)); return;
+    } catch (e) { res.statusCode = 500; res.end(JSON.stringify({ ok: false, error: e.message })); return; }
+  }
+
   // Identify bot via getMe so мы знаем КАКОМУ именно боту owner должен писать /start.
   let botInfo = null;
   let getMeError = null;
