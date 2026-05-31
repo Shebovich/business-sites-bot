@@ -125,29 +125,35 @@ async function assistantNudgeReply(ctx) {
   await ctx.reply(assistantNudge(), { parse_mode: 'HTML', reply_markup: kb });
 }
 
-// Ассистент пишет/говорит вне явной сборки, НО у него есть активный лид (#138):
-// не шаблоним — заходим в сборку этого лида и отправляем сообщение в CC.
-// Возвращает true, если обработали (сборка/выбор лида), false → показать nudge.
-async function routeAssistantFreeform(ctx, content) {
+// Ассистент свободно общается с CC, как owner (#139/#141). ЛЮБОЕ его сообщение вне
+// явной сборки (build-mode) → issue для CC. CC сам читает интент: общий вопрос / про
+// конкретного лида (сборка/правки/проблема) → отвечает/строит/советует через relay.
+// Контекст активных лидов кладём в тело, чтобы CC понимал, о ком речь (#138/#140).
+async function routeAssistantToCC(ctx, content) {
   const mine = await Leads.listByOwner(ctx.from.id).catch(() => []);
   const active = mine.filter((l) => ['taken', 'contacted', 'in-build'].includes(l.status));
-  if (active.length === 1) {
-    const l = active[0];
-    // Сообщение может быть И запросом на сборку, И вопросом про лида («мёртвый, что делать?»).
-    // Не презюмируем — отдаём в CC, он читает интент и либо строит, либо отвечает/советует (#140).
-    await Leads.setBuilding(ctx.from.id, l.key);
-    try { await createLeadBuildIssue(ctx, l.key, content); }
-    catch (e) { console.error('[freeform route]:', e.message); await ctx.reply('⚠️ Не смог передать: ' + e.message); return true; }
-    await ctx.reply(`📨 Принял по «${l.name || l.handle}» 👀 Секунду — гляну и отвечу.`);
-    return true;
-  }
-  if (active.length > 1) {
-    const kb = new InlineKeyboard();
-    for (const l of active.slice(0, 10)) kb.text(`🔨 ${(l.name || l.handle).slice(0, 35)}`, `lead:build:${l.key}`).row();
-    await ctx.reply('У тебя несколько лидов. По какому собрать сайт? Выбери — потом повтори, что нужно 👇', { reply_markup: kb });
-    return true;
-  }
-  return false;
+  try { await createAssistantMsgIssue(ctx, content, active); }
+  catch (e) { console.error('[assistant→cc]:', e.message); await ctx.reply('⚠️ Не смог передать: ' + e.message); return; }
+  await ctx.reply('📨 Принял 👀 Секунду — гляну и отвечу.');
+}
+
+// [assistant-msg] issue — свободное сообщение ассистента. CC отвечает ему через relay.
+async function createAssistantMsgIssue(ctx, content, activeLeads) {
+  const { createIssue } = await import('./github-api.mjs');
+  const reqText = content.text || (content.fileId ? `(медиа: ${content.kind})` : '(пустое)');
+  const leadsCtx = (activeLeads || []).length
+    ? (activeLeads.map((l) => `- ${l.name || l.handle} [${l.key}] · ${l.status} · ${l.profile_url || l.contact_url || 'IG вручную'}`).join('\n'))
+    : '(нет активных лидов)';
+  const body =
+    `<!-- assistant-msg-v1 -->\nfrom_chat: ${ctx.from.id}\n` +
+    (content.fileId ? `file_id: ${content.fileId}\n` : '') +
+    `<!-- /assistant-msg-v1 -->\n\n## Сообщение ассистента\n\n${reqText}\n\n## Активные лиды ассистента\n\n${leadsCtx}\n\n---\n\n` +
+    `CC: свободное сообщение АССИСТЕНТА (общается как owner, #141). Прочитай интент и ответь ему через relay-send (from_chat):\n` +
+    `• Общий вопрос (не про лида) → просто ответь по делу.\n` +
+    `• Про конкретного лида из списка — просьба собрать/правки → собери/правь прототип (реальные данные, B-дизайн, Lucide, OG), задеплой, relay ссылку. Вопрос/проблема (мёртвый лид, не отвечает) → посоветуй (отклонить кнопкой ❌ и взять следующего).\n` +
+    `• Непонятно, о каком лиде → уточни у ассистента.\n` +
+    (content.fileId ? `Медиа: /api/bug/media?file_id=${content.fileId}.` : '');
+  return await createIssue({ title: `[assistant-msg] ${String(reqText).slice(0, 50)}`, body, labels: ['prompt'] });
 }
 
 // @ника / ссылка → handle
@@ -3384,13 +3390,12 @@ export async function handlePhoto(ctx) {
     return;
   }
 
-  // Assistant вне сборки: есть активный лид → фото в сборку (#138), иначе подсказка.
+  // Assistant вне сборки → фото свободно к CC (#139/#141).
   if (ctx.role === 'assistant') {
     const sizes = ctx.message.photo;
     const largest = sizes[sizes.length - 1];
     const caption = (ctx.message.caption || '').trim();
-    if (await routeAssistantFreeform(ctx, { fileId: largest.file_id, kind: 'photo', text: caption })) return;
-    await ctx.reply('📷 Сначала возьми лида («🎯 Получить лида»). Когда будешь собирать его сайт — шли фото, добавлю.');
+    await routeAssistantToCC(ctx, { fileId: largest.file_id, kind: 'photo', text: caption });
     return;
   }
 
@@ -3558,9 +3563,8 @@ export async function handleVoice(ctx) {
     return;
   }
 
-  // Assistant вне сборки: есть активный лид → в сборку (#138), иначе nudge (#135).
-  if (await routeAssistantFreeform(ctx, { text: transcript })) return;
-  await assistantNudgeReply(ctx);
+  // Assistant вне сборки → свободно к CC (#139/#141).
+  await routeAssistantToCC(ctx, { text: transcript });
 }
 
 // Documents (PDFs, .md, любые file uploads) идут в /bug или /prompt session
@@ -3700,11 +3704,8 @@ export async function handleText(ctx) {
   // Build-mode (Ф3): человек собирает прототип лида — все сообщения идут в CC.
   if (await maybeRouteBuild(ctx, { text })) return;
 
-  // Lead-gen bot: ассистент вне сборки. Есть активный лид → в сборку (#138), иначе nudge (#135).
-  if (ctx.role === 'assistant') {
-    if (await routeAssistantFreeform(ctx, { text })) return;
-    await assistantNudgeReply(ctx); return;
-  }
+  // Lead-gen bot: ассистент вне сборки → свободно к CC (#139/#141). CC сам разберёт интент.
+  if (ctx.role === 'assistant') { await routeAssistantToCC(ctx, { text }); return; }
 
   // Interview answer priority — если chat сейчас отвечает на интервью, любой
   // free-form текст идёт в текущий вопрос. /cancel_interview прерывает.
