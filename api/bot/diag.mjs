@@ -77,6 +77,24 @@ export default async function handler(req, res) {
     } catch (e) { res.statusCode = 500; res.end(JSON.stringify({ ok: false, error: e.message })); return; }
   }
 
+  // ?claimlead=1 — добавить лида и сразу закрепить за владельцем (он уже написал сам),
+  // чтобы дедуп не предлагал его никому. Body {handle,name,niche,owner,contact_url}. Gated.
+  if (req.url?.includes('claimlead=1')) {
+    const SECRET = (process.env.CLAUDE_NOTIFY_SECRET || '').trim();
+    if (req.headers['x-notify-secret'] !== SECRET) { res.statusCode = 401; res.end(JSON.stringify({ ok: false, error: 'unauthorized' })); return; }
+    try {
+      const L = await import('../../scripts/bot/lib/leads.mjs');
+      let b = req.body; if (typeof b === 'string') b = JSON.parse(b);
+      const owner = String(b.owner || process.env.TG_OWNER_CHAT_ID || '').trim();
+      const up = await L.upsertLead({ handle: b.handle, name: b.name || '', kind: 'ig', niche: b.niche || 'свой', contact_url: b.contact_url || `https://ig.me/m/${L.normKey(b.handle)}`, profile_url: b.profile_url || `https://instagram.com/${L.normKey(b.handle)}`, source: 'owner-manual' });
+      const key = up.key || L.normKey(b.handle);
+      const take = await L.takeLead(owner, key);
+      if (take.ok) await L.setStatus(key, 'contacted', owner);
+      res.statusCode = 200; res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({ ok: true, added: !!up.added, dup: !!up.dup, claimed: take.ok, key }, null, 2)); return;
+    } catch (e) { res.statusCode = 500; res.end(JSON.stringify({ ok: false, error: e.message })); return; }
+  }
+
   // Identify bot via getMe so мы знаем КАКОМУ именно боту owner должен писать /start.
   let botInfo = null;
   let getMeError = null;
