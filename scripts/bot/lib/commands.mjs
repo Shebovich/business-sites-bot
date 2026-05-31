@@ -67,7 +67,7 @@ export async function handleStart(ctx) {
     '• Один лид достаётся одному человеку: если ты или кто-то его уже взял — другим он не выпадет.',
     '',
     '✉️ <b>Первый контакт</b>',
-    'Взял лида — напиши ему в личку: «Сделаю прототип вашего сайта за пару дней бесплатно. Не понравится — отстану. Понравится — отдам за $100». Отметь «Написал в ЛС» и бери следующего. Лид может ответить не сразу — это нормально.',
+    'Жми «✉️ Написать в директ» — откроется чат с бизнесом. Напиши: «Сделаю прототип вашего сайта за пару дней бесплатно. Не понравится — отстану. Понравится — отдам за $100». Потом жми «✍️ Написал в ЛС» — лид закрепится за тобой, и бери следующего. Ответят не сразу — это нормально.',
     '',
     '🔨 <b>Сборка сайта — это делаю я</b>',
     'Лид ответил — заходи в «Мои лиды» → «Собрать прототип». Дальше просто <b>говори или пиши мне</b> (голос, текст, фото), что нужно — я соберу настоящий сайт и пришлю ссылку. Захочешь что-то поправить — просто скажи, я переделаю. Тебе не нужно ничего уметь технически.',
@@ -100,7 +100,8 @@ export async function offerLeadCard(ctx) {
   }
   const kb = new InlineKeyboard();
   if (lead.contact_url) kb.url('✉️ Написать в директ', lead.contact_url).row(); // #128 — сразу в ЛС
-  kb.text('✅ Взять', `lead:take:${lead.key}`)
+  // #133 — «Написал в ЛС» сразу закрепляет лид (меньше шагов: take+contacted одним кликом)
+  kb.text('✍️ Написал в ЛС', `lead:take:${lead.key}`)
     .text('⏭ Пропустить', `lead:skip:${lead.key}`).row()
     .text('❌ Отклонить', `lead:reject:${lead.key}`);
   await ctx.reply(formatLeadCard(lead), { reply_markup: kb, parse_mode: 'HTML', disable_web_page_preview: true });
@@ -2308,11 +2309,13 @@ export async function handleCallback(ctx) {
           try { await ctx.editMessageText(msg, { reply_markup: nextKb }); } catch {}
         } else {
           const l = res.lead;
+          // #133 — закрепил И отметил «написал» одним кликом
+          await Leads.setStatus(arg, 'contacted', chatId).catch(() => {});
           const takeKb = new InlineKeyboard();
-          if (l.contact_url) takeKb.url('✉️ Написать в директ', l.contact_url).row();
+          if (l.contact_url) takeKb.url('✉️ Открыть директ', l.contact_url).row();
           takeKb.text('➡️ Следующий лид', 'lead:next');
           const contactLine = l.needs_manual_ig ? '\n⚠️ IG не нашёлся автоматически — найди профиль по названию.' : '';
-          try { await ctx.editMessageText(`✅ Взят: <b>${escapeHtml(l.name || l.handle)}</b>${contactLine}\n\nНапиши ему в директ. Когда написал — жми «Следующий».`, { parse_mode: 'HTML', disable_web_page_preview: true, reply_markup: takeKb }); } catch {}
+          try { await ctx.editMessageText(`✍️ Отмечено: написал «<b>${escapeHtml(l.name || l.handle)}</b>».${contactLine}\n\nЛид закреплён за тобой. Ответит — «📋 Мои лиды» → 🔨 Собрать прототип. Бери следующего 👇`, { parse_mode: 'HTML', disable_web_page_preview: true, reply_markup: takeKb }); } catch {}
         }
         return;
       }
