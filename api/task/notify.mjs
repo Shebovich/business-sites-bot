@@ -56,6 +56,7 @@ export default async function handler(req, res) {
       if (r.deduped) { res.status(200).json({ ok: true, deduped: true }); return; }
       if (r.rec && r.rec.priority === 'urgent') {
         await sendMessage(OWNER_ID, `🔔 <b>Срочно</b>\n\n${Attn.itemText(r.rec)}`, { parse_mode: 'HTML', disable_web_page_preview: true, reply_markup: Attn.itemKeyboard(r.rec) });
+        if (r.rec.voice_file_id) { try { const { tgApi } = await import('../../scripts/bot/lib/tg-api.mjs'); await tgApi('sendVoice', { chat_id: OWNER_ID, voice: r.rec.voice_file_id, caption: '🎤 оригинал от ассистента' }); } catch (e) { console.warn('[attn voice]', e.message); } }
       }
       res.status(200).json({ ok: true, id: r.id }); return;
     } catch (e) { console.error('[attn add]', e); res.status(500).json({ ok: false, error: e.message }); return; }

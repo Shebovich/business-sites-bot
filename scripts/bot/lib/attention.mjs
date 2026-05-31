@@ -36,6 +36,7 @@ export async function addItem(it) {
     id, type: it.type || 'escalation', priority: it.priority || 'normal',
     title: it.title || '(без названия)', detail: it.detail || '',
     initiator: it.initiator || '', lead_key: it.lead_key || '', url: it.url || '',
+    voice_file_id: it.voice_file_id || '', // #144 — оригинал голосового ассистента для owner
     suggested_action: it.suggested_action || '', source: it.source || 'cc',
     fixed: !!it.fixed, status: 'open', created_at: now(),
   };

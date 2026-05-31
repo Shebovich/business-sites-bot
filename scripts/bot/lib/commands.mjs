@@ -146,12 +146,13 @@ async function createAssistantMsgIssue(ctx, content, activeLeads) {
     : '(нет активных лидов)';
   const body =
     `<!-- assistant-msg-v1 -->\nfrom_chat: ${ctx.from.id}\n` +
-    (content.fileId ? `file_id: ${content.fileId}\n` : '') +
+    (content.fileId ? `file_id: ${content.fileId}\nmedia_kind: ${content.kind || 'file'}\n` : '') +
     `<!-- /assistant-msg-v1 -->\n\n## Сообщение ассистента\n\n${reqText}\n\n## Активные лиды ассистента\n\n${leadsCtx}\n\n---\n\n` +
     `CC: свободное сообщение АССИСТЕНТА (общается как owner, #141). Прочитай интент и ответь ему через relay-send (from_chat):\n` +
     `• Общий вопрос (не про лида) → просто ответь по делу.\n` +
     `• Про конкретного лида из списка — просьба собрать/правки → собери/правь прототип (реальные данные, B-дизайн, Lucide, OG), задеплой, relay ссылку. Вопрос/проблема (мёртвый лид, не отвечает) → посоветуй (отклонить кнопкой ❌ и взять следующего).\n` +
     `• Непонятно, о каком лиде → уточни у ассистента.\n` +
+    `• Если это РЕКОМЕНДАЦИЯ/что-то на ревью owner'у → attn-push (type recommendation, initiator=имя ассистента). Если был голос (media_kind voice) — добавь --voice <file_id>, owner получит оригинал голосового (#144).\n` +
     (content.fileId ? `Медиа: /api/bug/media?file_id=${content.fileId}.` : '');
   return await createIssue({ title: `[assistant-msg] ${String(reqText).slice(0, 50)}`, body, labels: ['prompt'] });
 }
@@ -2477,6 +2478,7 @@ export async function handleCallback(ctx) {
       if (!it) { try { await ctx.answerCallbackQuery({ text: 'Элемент не найден', show_alert: true }); } catch {} return; }
       if (action === 'open') {
         await ctx.reply(Attn.itemText(it), { parse_mode: 'HTML', disable_web_page_preview: true, reply_markup: Attn.itemKeyboard(it) });
+        if (it.voice_file_id) { try { await ctx.api.sendVoice(ctx.from.id, it.voice_file_id, { caption: '🎤 оригинал от ассистента' }); } catch (e) { console.warn('[attn open voice]', e.message); } }
       } else if (action === 'done') {
         await Attn.setStatus(id, 'done');
         try { await ctx.editMessageText(`✅ Закрыто: ${escapeHtml(it.title)}`, { parse_mode: 'HTML' }); } catch {}
@@ -3563,8 +3565,9 @@ export async function handleVoice(ctx) {
     return;
   }
 
-  // Assistant вне сборки → свободно к CC (#139/#141).
-  await routeAssistantToCC(ctx, { text: transcript });
+  // Assistant вне сборки → свободно к CC (#139/#141). Голос сохраняем (file_id) —
+  // если в нём что-то на ревью, CC пересылает оригинал owner'у (#144).
+  await routeAssistantToCC(ctx, { text: transcript, fileId, kind: 'voice' });
 }
 
 // Documents (PDFs, .md, любые file uploads) идут в /bug или /prompt session
