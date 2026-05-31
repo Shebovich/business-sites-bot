@@ -59,6 +59,24 @@ export default async function handler(req, res) {
     } catch (e) { res.statusCode = 500; res.end(JSON.stringify({ ok: false, error: e.message })); return; }
   }
 
+  // ?clearpool=1 — полная очистка пула лидов перед пересевом (gated). ВРЕМЕННОЕ.
+  if (req.url?.includes('clearpool=1')) {
+    const SECRET = (process.env.CLAUDE_NOTIFY_SECRET || '').trim();
+    if (req.headers['x-notify-secret'] !== SECRET) { res.statusCode = 401; res.end(JSON.stringify({ ok: false, error: 'unauthorized' })); return; }
+    try {
+      const { getRedis } = await import('../../scripts/bot/lib/state.mjs');
+      const r2 = getRedis();
+      let deleted = 0;
+      for (const pat of ['lead:*', 'leads:pool:*', 'leads:owner:*']) {
+        const ks = await r2.keys(pat);
+        for (const k of ks) { await r2.del(k); deleted++; }
+      }
+      for (const k of ['leads:all', 'leads:available', 'leads:reoffer']) { await r2.del(k); deleted++; }
+      res.statusCode = 200; res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({ ok: true, deleted }, null, 2)); return;
+    } catch (e) { res.statusCode = 500; res.end(JSON.stringify({ ok: false, error: e.message })); return; }
+  }
+
   // Identify bot via getMe so мы знаем КАКОМУ именно боту owner должен писать /start.
   let botInfo = null;
   let getMeError = null;

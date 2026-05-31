@@ -84,9 +84,9 @@ function formatLeadCard(lead) {
     `🎯 <b>${escapeHtml(lead.name || lead.handle)}</b>`,
     `Ниша: ${escapeHtml(lead.niche)}`,
   ];
-  if (lead.profile_url) lines.push(`🔗 ${lead.profile_url}`);
-  if (lead.kind === 'fb' || lead.kind === 'fb-id') lines.push('<i>(Facebook-страница — ссылку на Instagram ищи на ней)</i>');
-  lines.push('', 'Взять → написать в ЛС. Ответит — соберём прототип.');
+  if (lead.needs_manual_ig) lines.push('⚠️ <i>Instagram автоматически не нашёлся — найди профиль по названию вручную.</i>');
+  else if (lead.contact_url) lines.push('✉️ Кнопка ниже откроет диалог в директ.');
+  lines.push('', 'Взять → написать в директ. Ответит — соберём прототип.');
   return lines.join('\n');
 }
 
@@ -96,8 +96,9 @@ export async function offerLeadCard(ctx) {
     await ctx.reply('Свободных лидов сейчас нет — все разобраны. Загляни позже или предложи своего (➕).');
     return;
   }
-  const kb = new InlineKeyboard()
-    .text('✅ Взять', `lead:take:${lead.key}`)
+  const kb = new InlineKeyboard();
+  if (lead.contact_url) kb.url('✉️ Написать в директ', lead.contact_url).row(); // #128 — сразу в ЛС
+  kb.text('✅ Взять', `lead:take:${lead.key}`)
     .text('⏭ Пропустить', `lead:skip:${lead.key}`).row()
     .text('❌ Отклонить', `lead:reject:${lead.key}`);
   await ctx.reply(formatLeadCard(lead), { reply_markup: kb, parse_mode: 'HTML', disable_web_page_preview: true });
@@ -140,8 +141,9 @@ async function renderLeadActions(ctx, key) {
   const l = await Leads.getLead(key);
   if (!l) { await ctx.reply('Лид не найден.'); return; }
   const lines = [`<b>${escapeHtml(l.name || l.handle)}</b>`, `Статус: ${l.status}`];
-  if (l.profile_url) lines.push(`🔗 ${l.profile_url}`);
+  if (l.needs_manual_ig) lines.push('⚠️ IG найти вручную по названию');
   const kb = new InlineKeyboard();
+  if (l.contact_url) kb.url('✉️ Открыть директ', l.contact_url).row();
   if (l.status === 'taken') kb.text('✉️ Написал в ЛС', `lead:contacted:${key}`).row();
   kb.text('🔨 Собрать прототип', `lead:build:${key}`).row();
   await ctx.reply(lines.join('\n'), { reply_markup: kb, parse_mode: 'HTML', disable_web_page_preview: true });
@@ -2304,7 +2306,11 @@ export async function handleCallback(ctx) {
           try { await ctx.editMessageText(msg, { reply_markup: nextKb }); } catch {}
         } else {
           const l = res.lead;
-          try { await ctx.editMessageText(`✅ Взят: <b>${escapeHtml(l.name || l.handle)}</b>\n🔗 ${l.profile_url || ''}\n\nНапиши ему в ЛС. Когда написал — жми «Следующий».`, { parse_mode: 'HTML', disable_web_page_preview: true, reply_markup: nextKb }); } catch {}
+          const takeKb = new InlineKeyboard();
+          if (l.contact_url) takeKb.url('✉️ Написать в директ', l.contact_url).row();
+          takeKb.text('➡️ Следующий лид', 'lead:next');
+          const contactLine = l.needs_manual_ig ? '\n⚠️ IG не нашёлся автоматически — найди профиль по названию.' : '';
+          try { await ctx.editMessageText(`✅ Взят: <b>${escapeHtml(l.name || l.handle)}</b>${contactLine}\n\nНапиши ему в директ. Когда написал — жми «Следующий».`, { parse_mode: 'HTML', disable_web_page_preview: true, reply_markup: takeKb }); } catch {}
         }
         return;
       }
@@ -3556,7 +3562,8 @@ export async function handleText(ctx) {
       case 'lead_suggest': {
         const handle = parseHandle(text);
         if (!handle) { await ctx.reply('Не понял ника. Пришли @ника или ссылку на Instagram/Facebook.'); return; }
-        const up = await Leads.upsertLead({ handle, name: '', kind: /instagram/i.test(text) ? 'ig' : 'fb', profile_url: text.trim(), niche: 'свой', source: 'assistant' });
+        const isIg = /instagram\.com/i.test(text) || (!/facebook\.com/i.test(text)); // голый @ник трактуем как IG
+        const up = await Leads.upsertLead({ handle, name: '', kind: isIg ? 'ig' : 'fb', profile_url: text.trim(), contact_url: isIg ? `https://ig.me/m/${handle}` : '', niche: 'свой', source: 'assistant' });
         if (up.dup) { await ctx.reply('Этот лид уже в системе — кто-то его ведёт. Пришли другого.'); return; }
         await Leads.takeLead(ctx.from.id, up.key);
         await ctx.reply(`✅ Добавил и закрепил за тобой: ${escapeHtml(handle)}. Напиши ему в ЛС. Когда ответит — «Мои лиды» → 🔨 Собрать прототип.`, { parse_mode: 'HTML' });

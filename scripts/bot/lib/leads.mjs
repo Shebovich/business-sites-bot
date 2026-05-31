@@ -45,6 +45,7 @@ export async function upsertLead(lead) {
   const rec = {
     key, handle: lead.handle, name: lead.name || '', niche,
     kind: lead.kind || 'fb', profile_url: lead.profile_url || '',
+    contact_url: lead.contact_url || '', needs_manual_ig: !!lead.needs_manual_ig,
     source: lead.source || 'adlib', status: 'new', owner: null,
     created_at: now(), updated_at: now(),
     history: [{ s: 'new', at: now() }],
