@@ -3049,6 +3049,28 @@ export async function handlePhoto(ctx) {
     return;
   }
 
+  // Owner path: фото без активной задачи → prompt issue с file_id для CC
+  // (симметрия с handleVoice/handleText owner path). CC читает картинку через
+  // /api/bug/media и реагирует — НЕ загоняем owner'а в assistant photo-section flow.
+  if (ctx.role === 'owner' && !(await getCurrentTask(ctx.from.id))) {
+    const sizes = ctx.message.photo;
+    const largest = sizes[sizes.length - 1];
+    const caption = (ctx.message.caption || '').trim();
+    try {
+      const { createIssue } = await import('./github-api.mjs');
+      const issue = await createIssue({
+        title: `[owner-photo] ${caption ? caption.slice(0, 60) : 'фото от owner'}`,
+        body: `<!-- owner-photo-v1 -->\nfrom_chat: ${ctx.from.id}\nfile_id: ${largest.file_id}\n<!-- /owner-photo-v1 -->\n\n## Caption\n\n${caption || '(без подписи)'}\n\n---\n\nCC reactive: fetch image via /api/bug/media?file_id=${largest.file_id} → multimodal Read → execute → relay reply to owner via /api/relay/send.`,
+        labels: ['prompt'],
+      });
+      console.log(`[owner-photo issue=${issue.number}] file queued for CC`);
+    } catch (e) {
+      console.error('[owner-photo] createIssue failed:', e.message);
+      await ctx.reply(`⚠️ Не смог создать задачу: ${e.message}`);
+    }
+    return;
+  }
+
   const task = await getCurrentTask(ctx.from.id);
   const sectionId = await getActiveSection(ctx.from.id);
   if (!task || !sectionId) {
@@ -3107,6 +3129,25 @@ export async function handleVideo(ctx) {
       await ctx.reply(`${icon} Видео добавлено (${count}/10).${captionLine}\n\n/done — отправить.`);
     } else {
       await ctx.reply(`⚠️ Лимит 10 медиа.`);
+    }
+    return;
+  }
+
+  // Owner path: видео без активной задачи → prompt issue с file_id для CC.
+  if (ctx.role === 'owner' && !(await getCurrentTask(ctx.from.id))) {
+    const caption = (ctx.message.caption || '').trim();
+    const fileId = ctx.message.video.file_id;
+    try {
+      const { createIssue } = await import('./github-api.mjs');
+      const issue = await createIssue({
+        title: `[owner-video] ${caption ? caption.slice(0, 60) : 'видео от owner'}`,
+        body: `<!-- owner-video-v1 -->\nfrom_chat: ${ctx.from.id}\nfile_id: ${fileId}\n<!-- /owner-video-v1 -->\n\n## Caption\n\n${caption || '(без подписи)'}\n\n---\n\nCC reactive: fetch via /api/bug/media?file_id=${fileId} → execute → relay reply to owner via /api/relay/send.`,
+        labels: ['prompt'],
+      });
+      console.log(`[owner-video issue=${issue.number}] file queued for CC`);
+    } catch (e) {
+      console.error('[owner-video] createIssue failed:', e.message);
+      await ctx.reply(`⚠️ Не смог создать задачу: ${e.message}`);
     }
     return;
   }
@@ -3241,6 +3282,24 @@ export async function handleDocument(ctx) {
       const total = (await getTaskPrompts(task.issue_number)).length;
       const nameLine = doc.file_name ? ` (${doc.file_name})` : '';
       await ctx.reply(`💡 Документ${nameLine} добавлен в промт задачи (всего entries: ${total}).`);
+      return;
+    }
+    // Owner path: документ без активной задачи → prompt issue с file_id для CC.
+    if (ctx.role === 'owner' && !task) {
+      const doc = ctx.message.document;
+      const caption = (ctx.message.caption || '').trim();
+      try {
+        const { createIssue } = await import('./github-api.mjs');
+        const issue = await createIssue({
+          title: `[owner-doc] ${doc.file_name || caption.slice(0, 50) || 'документ от owner'}`,
+          body: `<!-- owner-doc-v1 -->\nfrom_chat: ${ctx.from.id}\nfile_id: ${doc.file_id}\nfile_name: ${doc.file_name || ''}\n<!-- /owner-doc-v1 -->\n\n## Caption\n\n${caption || '(без подписи)'}\n\n---\n\nCC reactive: fetch via /api/bug/media?file_id=${doc.file_id} → execute → relay reply to owner via /api/relay/send.`,
+          labels: ['prompt'],
+        });
+        console.log(`[owner-doc issue=${issue.number}] file queued for CC`);
+      } catch (e) {
+        console.error('[owner-doc] createIssue failed:', e.message);
+        await ctx.reply(`⚠️ Не смог создать задачу: ${e.message}`);
+      }
       return;
     }
     await ctx.reply('Документы принимаются только в /bug, /prompt сессии или в активном «Промт задачи» (через section keyboard).');
