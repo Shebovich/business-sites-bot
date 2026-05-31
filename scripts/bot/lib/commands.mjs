@@ -41,7 +41,16 @@ import * as Attn from './attention.mjs';
 import * as Trust from './trust.mjs';
 import { transcribeTgVoice } from './voice-transcribe.mjs';
 import { getInterviewWaitingForChat, captureInterviewAnswer, getInterviewSession, cancelInterview } from './state.mjs';
-import { InlineKeyboard } from 'grammy';
+import { InlineKeyboard, Keyboard } from 'grammy';
+
+// Постоянная нижняя панель — всегда видна в боте (#178). Кнопки шлют текст,
+// перехватывается в handleText (panelRoute).
+function mainPanel() {
+  return new Keyboard()
+    .text('🎯 Получить лида').row()
+    .text('📋 Мои лиды').text('➕ Предложить своего')
+    .resized().persistent();
+}
 // Note: `dispatchWorkflow` kept imported as a dormant fallback (Q18.1).
 // If we revert from Claude Code executor to GH Actions, restore the call in
 // runRebuild() step 3 — no other changes needed.
@@ -54,10 +63,6 @@ const STUB_M2 = 'Эта команда появится в M2. Сейчас до
 // ---- M1 real handlers ----------------------------------------------------
 
 export async function handleStart(ctx) {
-  const kb = new InlineKeyboard()
-    .text('🎯 Получить лида', 'lead:next').row()
-    .text('➕ Предложить своего', 'lead:suggest').row()
-    .text('📋 Мои лиды', 'lead:myleads');
   const lines = [
     '👋 Привет! Ты в команде Shebovich. Мы делаем сайты бизнесам, которые уже тратят деньги на рекламу, и берём за это оплату. Твоя задача — находить таких и доводить до готового сайта. Всю техническую работу делаю я, бот. Объясню по порядку, простыми словами:',
     '',
@@ -75,9 +80,9 @@ export async function handleStart(ctx) {
     '👀 <b>Ревью и отправка</b>',
     'Когда доволен прототипом — жми «Готово». Я отправлю его на проверку Pavel\'у. Он одобрит — и ты отправляешь ссылку лиду. Понравится клиенту — сделка засчитана.',
     '',
-    'Со мной можно общаться как с человеком — голосом, текстом, фотками. Я пойму. Поехали 👇',
+    'Со мной можно общаться как с человеком — голосом, текстом, фотками. Я пойму. Кнопки снизу всегда под рукой 👇',
   ];
-  await ctx.reply(lines.join('\n'), { reply_markup: kb, parse_mode: 'HTML' });
+  await ctx.reply(lines.join('\n'), { reply_markup: mainPanel(), parse_mode: 'HTML' });
 }
 
 // Готовое первое сообщение лиду — собирается из взаимозаменяемых блоков, КАЖДЫЙ РАЗ
@@ -3680,6 +3685,15 @@ export async function handleDocument(ctx) {
 
 export async function handleText(ctx) {
   const text = (ctx.message?.text || '').trim();
+
+  // Постоянная нижняя панель (#178) — кнопки шлют текст, ловим здесь раньше всего.
+  if (text === '🎯 Получить лида') { await offerLeadCard(ctx); return; }
+  if (text === '📋 Мои лиды') { await renderMyLeads(ctx); return; }
+  if (text === '➕ Предложить своего') {
+    await setCommandPending(String(ctx.from.id), { command: 'lead_suggest' });
+    await ctx.reply('Пришли @ник или ссылку на Instagram бизнеса — добавлю и закреплю за тобой.');
+    return;
+  }
   if (!text) return;
 
   // Conversational flow: if a previous /command set a pending input
