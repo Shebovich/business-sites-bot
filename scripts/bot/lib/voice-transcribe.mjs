@@ -80,6 +80,9 @@ export async function transcribeTgVoice(fileId, { hintLanguage = 'ru' } = {}) {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify(body),
+          // Per-key timeout: медленный/зависший ключ не должен съесть весь
+          // бюджет функции (webhook maxDuration 30s). Abort → catch → след. ключ.
+          signal: AbortSignal.timeout(7000),
         },
       );
       if (!geminiResp.ok) {
