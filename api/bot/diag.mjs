@@ -208,6 +208,19 @@ export default async function handler(req, res) {
     }
   }
 
+  // ?dashboard=ui — отдать HTML-страницу дашборда (статика через функцию, т.к.
+  // zero-config бот не публикует public/). Сам HTML секретов не содержит; данные
+  // тянутся отдельным запросом ?dashboard=1 с токеном из ?t=. Owner открывает:
+  // /api/bot/diag?dashboard=ui&t=<secret>
+  if (req.url?.includes('dashboard=ui')) {
+    try {
+      const { readFileSync } = await import('node:fs');
+      const html = readFileSync(new URL('./dashboard.html', import.meta.url), 'utf8');
+      res.statusCode = 200; res.setHeader('content-type', 'text/html; charset=utf-8');
+      res.setHeader('cache-control', 'no-store'); res.end(html); return;
+    } catch (e) { res.statusCode = 500; res.end('dashboard ui load failed: ' + e.message); return; }
+  }
+
   // ?dashboard=1 — данные дашборда ассистентов (#202/#206). Owner-only:
   // x-notify-secret ИЛИ ?t=<secret> (фронт открывается по ссылке с токеном).
   // Логика в lib (Hobby лимит 12 функций — складываем в diag).
