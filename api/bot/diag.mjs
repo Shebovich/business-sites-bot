@@ -145,6 +145,46 @@ export default async function handler(req, res) {
     } catch (e) { res.statusCode = 500; res.end(JSON.stringify({ ok: false, error: e.message })); return; }
   }
 
+  // ?gemini=1 — health-probe каждого Gemini-ключа (voice transcription path).
+  // Owner #204: голосовые должны работать + перепроверять при старте сессии.
+  // Шлёт минимальный text generateContent на тот же model что и transcribe →
+  // точный per-key статус (200 ok / 429 quota / 403 invalid key / 400 model).
+  // Gated (секрет): делает реальные API-вызовы (расход квоты).
+  if (req.url?.includes('gemini=1')) {
+    const SECRET = (process.env.CLAUDE_NOTIFY_SECRET || '').trim();
+    if (req.headers['x-notify-secret'] !== SECRET) { res.statusCode = 401; res.end(JSON.stringify({ ok: false, error: 'unauthorized' })); return; }
+    try {
+      const GEMINI_MODEL = 'gemini-2.5-flash';
+      const multi = (process.env.GEMINI_API_KEYS || '').trim();
+      const keys = multi
+        ? multi.split(',').map((k) => k.trim()).filter(Boolean)
+        : ((process.env.GEMINI_API_KEY || '').trim() ? [process.env.GEMINI_API_KEY.trim()] : []);
+      if (!keys.length) { res.statusCode = 200; res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({ ok: false, error: 'no GEMINI_API_KEYS / GEMINI_API_KEY configured', keys: 0 }, null, 2)); return; }
+      const body = { contents: [{ parts: [{ text: 'ping' }] }], generationConfig: { maxOutputTokens: 1, temperature: 0 } };
+      const probes = [];
+      for (let i = 0; i < keys.length; i++) {
+        const key = keys[i];
+        const prefix = key.slice(0, 6) + '…' + key.slice(-3);
+        try {
+          const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${key}`, {
+            method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+          });
+          let detail = '';
+          if (!r.ok) { const t = await r.text(); detail = t.slice(0, 160); }
+          probes.push({ idx: i + 1, key: prefix, status: r.status, ok: r.ok });
+          if (detail) probes[probes.length - 1].detail = detail;
+        } catch (e) {
+          probes.push({ idx: i + 1, key: prefix, status: 0, ok: false, detail: e.message });
+        }
+      }
+      const anyOk = probes.some((p) => p.ok);
+      const allQuota = probes.length > 0 && probes.every((p) => p.status === 429);
+      res.statusCode = 200; res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({ ok: anyOk, model: GEMINI_MODEL, keys: keys.length, healthy: probes.filter((p) => p.ok).length, all_quota_exhausted: allQuota, probes }, null, 2));
+      return;
+    } catch (e) { res.statusCode = 500; res.end(JSON.stringify({ ok: false, error: e.message })); return; }
+  }
+
   // Identify bot via getMe so мы знаем КАКОМУ именно боту owner должен писать /start.
   let botInfo = null;
   let getMeError = null;
