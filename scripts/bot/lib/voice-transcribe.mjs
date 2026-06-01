@@ -55,11 +55,20 @@ export async function transcribeTgVoice(fileId, { hintLanguage = 'ru' } = {}) {
     }],
     generationConfig: {
       temperature: 0.1,
-      maxOutputTokens: 1024,
+      maxOutputTokens: 2048,
+      // gemini-2.5-flash — thinking-модель: с дефолтным thinking budget она
+      // тратит maxOutputTokens на внутренние «размышления» и возвращает ПУСТОЙ
+      // текст (finishReason MAX_TOKENS, parts отсутствуют) → транскрипция падала.
+      // Транскрипции рассуждать не нужно — отключаем thinking (надёжнее + быстрее).
+      thinkingConfig: { thinkingBudget: 0 },
     },
   };
 
   console.log(`[voice-transcribe] start — ${keys.length} keys available, audio size ${buf.length}b`);
+  // Fallback на ЛЮБУЮ осечку ключа (429 quota / 5xx overloaded / пустой ответ /
+  // network), не только 429. Раньше первый non-429 error делал throw и
+  // остальные ключи не пробовались → один транзиентный сбой = «не удалось»
+  // при живых запасных ключах (#204). Throw только когда ВСЕ ключи исчерпаны.
   let lastError;
   for (let i = 0; i < keys.length; i++) {
     const key = keys[i];
@@ -73,32 +82,28 @@ export async function transcribeTgVoice(fileId, { hintLanguage = 'ru' } = {}) {
           body: JSON.stringify(body),
         },
       );
-      if (geminiResp.status === 429) {
-        const text = await geminiResp.text();
-        console.warn(`[voice-transcribe] ${keyTag} 429 rate limited, trying next key. Detail: ${text.slice(0, 200)}`);
-        lastError = new Error(`Gemini 429 (${keyTag})`);
-        continue;
-      }
       if (!geminiResp.ok) {
         const text = await geminiResp.text();
-        console.error(`[voice-transcribe] ${keyTag} HTTP ${geminiResp.status}: ${text}`);
-        throw new Error(`Gemini API ${geminiResp.status}: ${text.slice(0, 500)}`);
+        const level = geminiResp.status === 429 ? 'warn' : 'error';
+        console[level](`[voice-transcribe] ${keyTag} HTTP ${geminiResp.status}, trying next key. Detail: ${text.slice(0, 200)}`);
+        lastError = new Error(`Gemini ${geminiResp.status} (${keyTag}): ${text.slice(0, 200)}`);
+        continue;
       }
       const json = await geminiResp.json();
       const transcript = json?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
       if (!transcript) {
-        console.error(`[voice-transcribe] ${keyTag} empty response: ${JSON.stringify(json)}`);
-        throw new Error(`Gemini returned no text: ${JSON.stringify(json).slice(0, 500)}`);
+        const finish = json?.candidates?.[0]?.finishReason || 'unknown';
+        console.error(`[voice-transcribe] ${keyTag} empty response (finishReason=${finish}), trying next key`);
+        lastError = new Error(`Gemini empty text (${keyTag}, finishReason=${finish})`);
+        continue;
       }
       if (i > 0) console.log(`[voice-transcribe] ${keyTag} succeeded after fallback from ${i} key(s)`);
       return transcript;
     } catch (e) {
-      // Network errors etc — fail (не fallback на bugs)
-      if (e.message.includes('Gemini 429')) {
-        lastError = e;
-        continue;
-      }
-      throw e;
+      // Network/parse error на этом ключе — пробуем следующий, не сдаёмся сразу.
+      console.error(`[voice-transcribe] ${keyTag} threw: ${e.message}, trying next key`);
+      lastError = e;
+      continue;
     }
   }
 

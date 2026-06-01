@@ -185,6 +185,29 @@ export default async function handler(req, res) {
     } catch (e) { res.statusCode = 500; res.end(JSON.stringify({ ok: false, error: e.message })); return; }
   }
 
+  // ?transcribe=1 — end-to-end проверка голоса: POST {file_id} → реальный
+  // transcribeTgVoice (тот же путь что в handleVoice). Возвращает транскрипт
+  // или ошибку. Для верификации фикса #204 + ручной диагностики. Gated.
+  if (req.url?.includes('transcribe=1')) {
+    const SECRET = (process.env.CLAUDE_NOTIFY_SECRET || '').trim();
+    if (req.headers['x-notify-secret'] !== SECRET) { res.statusCode = 401; res.end(JSON.stringify({ ok: false, error: 'unauthorized' })); return; }
+    try {
+      let b = req.body; if (typeof b === 'string') b = JSON.parse(b);
+      const fileId = b?.file_id;
+      if (!fileId) { res.statusCode = 400; res.end(JSON.stringify({ ok: false, error: 'file_id required in body' })); return; }
+      const { transcribeTgVoice } = await import('../../scripts/bot/lib/voice-transcribe.mjs');
+      const t0 = Date.now();
+      const transcript = await transcribeTgVoice(fileId);
+      res.statusCode = 200; res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({ ok: true, ms: Date.now() - t0, length: transcript.length, transcript }, null, 2));
+      return;
+    } catch (e) {
+      res.statusCode = 200; res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({ ok: false, error: e.message }, null, 2));
+      return;
+    }
+  }
+
   // Identify bot via getMe so мы знаем КАКОМУ именно боту owner должен писать /start.
   let botInfo = null;
   let getMeError = null;
