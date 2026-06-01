@@ -208,6 +208,22 @@ export default async function handler(req, res) {
     }
   }
 
+  // ?dashboard=1 — данные дашборда ассистентов (#202/#206). Owner-only:
+  // x-notify-secret ИЛИ ?t=<secret> (фронт открывается по ссылке с токеном).
+  // Логика в lib (Hobby лимит 12 функций — складываем в diag).
+  if (req.url?.includes('dashboard=1')) {
+    const SECRET = (process.env.CLAUDE_NOTIFY_SECRET || '').trim();
+    const t = req.headers['x-notify-secret'] || (req.url.match(/[?&]t=([^&]+)/) || [])[1];
+    if (!SECRET || t !== SECRET) { res.statusCode = 401; res.end(JSON.stringify({ ok: false, error: 'unauthorized' })); return; }
+    try {
+      const { buildDashboardData } = await import('../../scripts/bot/lib/dashboard.mjs');
+      const tgToken = (process.env.TG_BOT_TOKEN || '').replace(/^﻿/, '').trim();
+      const data = await buildDashboardData(tgToken);
+      res.statusCode = 200; res.setHeader('content-type', 'application/json'); res.setHeader('cache-control', 'no-store');
+      res.end(JSON.stringify(data, null, 2)); return;
+    } catch (e) { res.statusCode = 500; res.end(JSON.stringify({ ok: false, error: e.message })); return; }
+  }
+
   // Identify bot via getMe so мы знаем КАКОМУ именно боту owner должен писать /start.
   let botInfo = null;
   let getMeError = null;

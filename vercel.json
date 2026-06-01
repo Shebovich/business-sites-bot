@@ -25,7 +25,7 @@
     "api/claude/qna.mjs": {
       "maxDuration": 10
     },
-    "api/assistants/dashboard.mjs": {
+    "api/bot/diag.mjs": {
       "maxDuration": 30
     }
   },
@@ -43,7 +43,6 @@
     { "source": "/api/interview/start", "destination": "/api/interview/index.mjs" },
     { "source": "/api/interview/result", "destination": "/api/interview/index.mjs" },
     { "source": "/api/claude/question", "destination": "/api/claude/qna.mjs" },
-    { "source": "/api/claude/answer", "destination": "/api/claude/qna.mjs" },
-    { "source": "/api/assistants/dashboard", "destination": "/api/assistants/dashboard.mjs" }
+    { "source": "/api/claude/answer", "destination": "/api/claude/qna.mjs" }
   ]
 }
