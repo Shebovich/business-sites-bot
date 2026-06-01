@@ -56,7 +56,7 @@ export default async function handler(req, res) {
       if (r.deduped) { res.status(200).json({ ok: true, deduped: true }); return; }
       // Сразу пушим owner'у: срочное + всё, что требует ЕГО решения (рекомендации ассистентов,
       // эскалации, запросы доступа). Только инфо/аномалии копятся в сводку, чтоб не спамить (#152).
-      const pushNow = r.rec && (r.rec.priority === 'urgent' || ['recommendation', 'escalation', 'access'].includes(r.rec.type));
+      const pushNow = r.rec && (r.rec.priority === 'urgent' || ['recommendation', 'escalation', 'access', 'prototype'].includes(r.rec.type));
       if (pushNow) {
         const head = r.rec.priority === 'urgent' ? '🔔 <b>Срочно</b>' : '📥 <b>На твоё решение</b>';
         await sendMessage(OWNER_ID, `${head}\n\n${Attn.itemText(r.rec)}`, { parse_mode: 'HTML', disable_web_page_preview: true, reply_markup: Attn.itemKeyboard(r.rec) });
