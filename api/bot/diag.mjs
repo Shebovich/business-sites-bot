@@ -208,6 +208,26 @@ export default async function handler(req, res) {
     }
   }
 
+  // ?setproto=1 — привязать URL собранного прототипа к лиду (для дашборда).
+  // CC вызывает после деплоя прототипа лида. Body {key, url, status?}. Gated.
+  if (req.url?.includes('setproto=1')) {
+    const SECRET = (process.env.CLAUDE_NOTIFY_SECRET || '').trim();
+    if (req.headers['x-notify-secret'] !== SECRET) { res.statusCode = 401; res.end(JSON.stringify({ ok: false, error: 'unauthorized' })); return; }
+    try {
+      let b = req.body; if (typeof b === 'string') b = JSON.parse(b);
+      const L = await import('../../scripts/bot/lib/leads.mjs');
+      const key = L.normKey(b.key);
+      const { getRedis } = await import('../../scripts/bot/lib/state.mjs');
+      const rr = getRedis(); const rec = await rr.get(`lead:${key}`);
+      if (!rec) { res.statusCode = 404; res.end(JSON.stringify({ ok: false, error: 'lead not found' })); return; }
+      rec.prototype_url = String(b.url || '').trim();
+      await rr.set(`lead:${key}`, rec);
+      if (b.status) await L.setStatus(key, String(b.status), rec.owner || null);
+      res.statusCode = 200; res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({ ok: true, key, prototype_url: rec.prototype_url, status: b.status || rec.status }, null, 2)); return;
+    } catch (e) { res.statusCode = 500; res.end(JSON.stringify({ ok: false, error: e.message })); return; }
+  }
+
   // ?dashboard=ui — отдать HTML-страницу дашборда (статика через функцию, т.к.
   // zero-config бот не публикует public/). Сам HTML секретов не содержит; данные
   // тянутся отдельным запросом ?dashboard=1 с токеном из ?t=. Owner открывает:
