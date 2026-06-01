@@ -40,6 +40,7 @@ import * as Leads from './leads.mjs';
 import * as Attn from './attention.mjs';
 import * as Trust from './trust.mjs';
 import { transcribeTgVoice } from './voice-transcribe.mjs';
+import { appendTimeline } from './timeline.mjs';
 import { getInterviewWaitingForChat, captureInterviewAnswer, getInterviewSession, cancelInterview } from './state.mjs';
 import { InlineKeyboard, Keyboard } from 'grammy';
 
@@ -175,7 +176,22 @@ async function assistantNudgeReply(ctx) {
 // явной сборки (build-mode) → issue для CC. CC сам читает интент: общий вопрос / про
 // конкретного лида (сборка/правки/проблема) → отвечает/строит/советует через relay.
 // Контекст активных лидов кладём в тело, чтобы CC понимал, о ком речь (#138/#140).
+// Нормализуем content → запись ленты (text / voice transcript+audio / media).
+function tlEntry(content, extra = {}) {
+  const isVoice = content.kind === 'voice';
+  const isMedia = content.kind === 'photo' || content.kind === 'doc';
+  return {
+    kind: content.kind || 'text',
+    text: isVoice ? undefined : (content.text || undefined),
+    transcript: isVoice ? content.text : undefined,
+    audio_file_id: isVoice ? content.fileId : undefined,
+    media_file_id: isMedia ? content.fileId : undefined,
+    ...extra,
+  };
+}
+
 async function routeAssistantToCC(ctx, content) {
+  await appendTimeline(ctx.from.id, tlEntry(content));
   const mine = await Leads.listByOwner(ctx.from.id).catch(() => []);
   const active = mine.filter((l) => ['taken', 'contacted', 'in-build'].includes(l.status));
   try { await createAssistantMsgIssue(ctx, content, active); }
@@ -216,6 +232,7 @@ function parseHandle(s) {
 async function maybeRouteBuild(ctx, content) {
   const key = await Leads.getBuilding(ctx.from.id).catch(() => null);
   if (!key) return false;
+  await appendTimeline(ctx.from.id, tlEntry(content, { lead_key: key }));
   try { await createLeadBuildIssue(ctx, key, content); }
   catch (e) { console.error('[build route]:', e.message); await ctx.reply('⚠️ Не смог передать в сборку: ' + e.message); }
   return true;
