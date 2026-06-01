@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex, nofollow">
+<title>Команда — дашборд ассистентов</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=VT323&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#0e1021; --panel:#1a1d3a; --panel2:#23264a;
+    --ink:#e8ecff; --dim:#8b91c4; --line:#343a6b;
+    --green:#4ade80; --amber:#fbbf24; --red:#f87171; --cyan:#38bdf8; --violet:#a78bfa; --pink:#f472b6;
+    --pixel:'Press Start 2P', monospace; --read:'VT323', monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;background:var(--bg);color:var(--ink);
+    font-family:var(--read);font-size:20px;line-height:1.35;
+    background-image:radial-gradient(circle at 1px 1px, rgba(255,255,255,.04) 1px, transparent 0);
+    background-size:24px 24px;}
+  h1,h2,h3,.px{font-family:var(--pixel);letter-spacing:.5px;}
+  .wrap{max-width:1100px;margin:0 auto;padding:18px 14px 64px;}
+  header.top{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:6px;}
+  header.top h1{font-size:15px;margin:0;color:var(--cyan);text-shadow:2px 2px 0 #0a3d52;}
+  .sub{color:var(--dim);font-size:18px}
+  .refresh{margin-left:auto;font-size:13px;color:var(--dim);font-family:var(--pixel)}
+  .dot{width:9px;height:9px;display:inline-block;border-radius:1px;margin-right:5px;vertical-align:middle}
+  .dot.on{background:var(--green);box-shadow:0 0 6px var(--green)}
+  .dot.off{background:#4b5081}
+
+  /* pixel panel */
+  .panel{background:var(--panel);border:3px solid var(--line);
+    box-shadow:0 4px 0 #0b0d1f, inset 0 0 0 2px #11142e;
+    image-rendering:pixelated;padding:14px;margin:14px 0;border-radius:2px;}
+
+  /* leaderboard */
+  .board{display:flex;gap:10px;overflow-x:auto;padding-bottom:4px}
+  .lb{min-width:120px;flex:0 0 auto;text-align:center;background:var(--panel2);
+    border:2px solid var(--line);padding:10px 8px;border-radius:2px;position:relative}
+  .lb .rank{font-family:var(--pixel);font-size:11px;color:var(--amber)}
+  .lb img{width:54px;height:54px;image-rendering:pixelated;margin:4px auto;display:block;
+    background:#0d1030;border:2px solid var(--line)}
+  .lb .nm{font-size:16px;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .lb .sc{font-family:var(--pixel);font-size:10px;color:var(--green);margin-top:3px}
+  .lb.first{border-color:var(--amber);box-shadow:0 0 10px rgba(251,191,36,.4)}
+
+  /* assistant card */
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(330px,1fr));gap:14px}
+  .card .hd{display:flex;gap:12px;align-items:center}
+  .ava{width:64px;height:64px;image-rendering:pixelated;background:#0d1030;border:3px solid var(--line);flex:0 0 auto}
+  .who{flex:1;min-width:0}
+  .who .nm{font-family:var(--pixel);font-size:12px;color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .who .meta{color:var(--dim);font-size:16px;margin-top:3px}
+  .lvl{font-family:var(--pixel);font-size:9px;color:var(--violet)}
+  .xpbar{height:10px;background:#0d1030;border:2px solid var(--line);margin-top:5px;position:relative;overflow:hidden}
+  .xpbar i{display:block;height:100%;background:linear-gradient(90deg,var(--violet),var(--pink));}
+  .badge{display:inline-block;font-family:var(--pixel);font-size:8px;padding:3px 5px;border:2px solid var(--line);border-radius:2px;margin-right:4px}
+  .badge.trusted{color:var(--green);border-color:var(--green)}
+  .badge.new{color:var(--dim)}
+  .cur{margin-top:10px;background:var(--panel2);border-left:3px solid var(--cyan);padding:7px 9px;font-size:17px}
+  .cur b{color:var(--cyan)}
+  .stat{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
+  .stat span{background:var(--panel2);border:2px solid var(--line);padding:3px 7px;font-size:15px;color:var(--dim)}
+  .stat span b{color:var(--ink);font-family:var(--pixel);font-size:10px}
+
+  .tabs{display:flex;gap:6px;margin-top:12px}
+  .tab{font-family:var(--pixel);font-size:9px;padding:6px 8px;background:var(--panel2);border:2px solid var(--line);
+    color:var(--dim);cursor:pointer;border-radius:2px;user-select:none}
+  .tab.active{color:var(--ink);border-color:var(--cyan)}
+  .pane{margin-top:10px;display:none}
+  .pane.show{display:block}
+
+  /* feed */
+  .feed{max-height:340px;overflow-y:auto;padding-right:4px}
+  .msg{border-bottom:1px dashed var(--line);padding:7px 0}
+  .msg .t{color:var(--dim);font-size:13px;font-family:var(--pixel)}
+  .msg .k{font-size:13px;margin-left:6px;padding:1px 5px;border:1px solid var(--line);border-radius:2px;color:var(--cyan)}
+  .msg .body{margin-top:3px;color:var(--ink);font-size:18px;white-space:pre-wrap;word-break:break-word}
+  .msg audio{width:100%;height:34px;margin-top:5px;filter:hue-rotate(180deg) saturate(.7)}
+  .msg img.ph{max-width:160px;border:2px solid var(--line);margin-top:5px;image-rendering:auto;cursor:pointer}
+  .msg .lead-tag{font-size:13px;color:var(--amber)}
+
+  /* leads */
+  .lead{border:2px solid var(--line);background:var(--panel2);padding:9px;margin-bottom:9px;border-radius:2px}
+  .lead .lh{display:flex;justify-content:space-between;gap:8px;align-items:center}
+  .lead .lh b{font-size:18px}
+  .st{font-family:var(--pixel);font-size:8px;padding:3px 6px;border-radius:2px;border:2px solid}
+  .st.taken{color:var(--dim);border-color:var(--dim)}
+  .st.contacted{color:var(--cyan);border-color:var(--cyan)}
+  .st.in-build{color:var(--amber);border-color:var(--amber)}
+  .st.owner-review,.st.pitched{color:var(--violet);border-color:var(--violet)}
+  .st.sold{color:var(--green);border-color:var(--green)}
+  .lead .proto{margin-top:8px;display:flex;gap:10px;align-items:flex-start}
+  .lead .proto img{width:140px;height:90px;object-fit:cover;border:2px solid var(--line);background:#0d1030}
+  .lead a{color:var(--cyan)}
+  .edits{margin-top:7px;font-size:15px;color:var(--dim)}
+  .edits .e{padding:2px 0;border-top:1px dotted var(--line)}
+  .empty{color:var(--dim);font-size:16px;padding:8px 0}
+  .err{color:var(--red);font-family:var(--pixel);font-size:11px;padding:20px;text-align:center}
+  .skel{color:var(--dim);font-family:var(--pixel);font-size:11px;text-align:center;padding:30px}
+  a{color:var(--cyan)}
+  ::-webkit-scrollbar{width:8px;height:8px}
+  ::-webkit-scrollbar-thumb{background:var(--line)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <h1>▚ КОМАНДА</h1>
+    <span class="sub">живой дашборд ассистентов</span>
+    <span class="refresh" id="refresh">…</span>
+  </header>
+
+  <div id="root"><div class="skel">ЗАГРУЗКА…</div></div>
+</div>
+
+<script>
+const TOKEN = new URLSearchParams(location.search).get('t') || '';
+const API = '/api/bot/diag?dashboard=1';
+const mediaCache = {};
+const openState = {}; // chat_id -> 'feed'|'leads'
+
+function esc(s){return String(s==null?'':s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
+function ava(name){return 'https://api.dicebear.com/9.x/pixel-art/svg?seed='+encodeURIComponent(name||'?')+'&backgroundColor=0d1030';}
+function tago(ts){if(!ts)return'';const d=(Date.now()-ts)/1000;
+  if(d<60)return'только что';if(d<3600)return Math.floor(d/60)+' мин назад';
+  if(d<86400)return Math.floor(d/3600)+' ч назад';return Math.floor(d/86400)+' дн назад';}
+function clock(ts){const x=new Date(ts);return x.toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'});}
+function xpForLevel(l){return Math.ceil(3*l*l);} // обратное к level=sqrt(xp/3)+1
+
+async function mediaUrl(fileId){
+  if(mediaCache[fileId])return mediaCache[fileId];
+  try{const r=await fetch('/api/bug/media?file_id='+encodeURIComponent(fileId),{headers:{'x-notify-secret':TOKEN}});
+    const j=await r.json();if(j.ok){mediaCache[fileId]=j.url;return j.url;}}catch(e){}
+  return null;
+}
+
+function leaderboard(lb){
+  if(!lb||!lb.length)return'';
+  const items=lb.map((a,i)=>`
+    <div class="lb ${i===0?'first':''}">
+      <div class="rank">#${i+1}</div>
+      <img src="${ava(a.name)}" alt="">
+      <div class="nm">${esc(a.name)}</div>
+      <div class="sc">⭐ ${a.day_score} · LVL ${a.level}</div>
+    </div>`).join('');
+  return `<div class="panel"><h2 style="font-size:11px;color:var(--amber);margin:0 0 10px">🏆 ЛИДЕРБОРД ДНЯ</h2><div class="board">${items}</div></div>`;
+}
+
+function feedHtml(tl){
+  if(!tl||!tl.length)return`<div class="empty">Сообщений пока нет (лента наполняется с момента запуска).</div>`;
+  return `<div class="feed">`+[...tl].reverse().map(m=>{
+    const kind={text:'✍️ текст',voice:'🎤 голос',photo:'📷 фото',doc:'📎 файл'}[m.kind]||m.kind;
+    let body='';
+    if(m.kind==='voice'){body=`<div class="body">${esc(m.transcript||'(без расшифровки)')}</div><audio controls preload="none" data-aid="${esc(m.audio_file_id||'')}"></audio>`;}
+    else if(m.kind==='photo'){body=`${m.text?`<div class="body">${esc(m.text)}</div>`:''}<img class="ph" data-pid="${esc(m.media_file_id||'')}" alt="фото" loading="lazy">`;}
+    else{body=`<div class="body">${esc(m.text||'(пусто)')}</div>`;}
+    const lt=m.lead_key?`<span class="lead-tag"> · по лиду ${esc(m.lead_key)}</span>`:'';
+    return `<div class="msg"><span class="t">${clock(m.ts)}</span><span class="k">${kind}</span>${lt}${body}</div>`;
+  }).join('')+`</div>`;
+}
+
+function leadsHtml(leads){
+  if(!leads||!leads.length)return`<div class="empty">Взятых лидов нет.</div>`;
+  return leads.map(l=>{
+    const stc=(l.status||'').replace(/[^a-z\-]/g,'');
+    const proto=l.prototype_url?`
+      <div class="proto">
+        <img loading="lazy" src="https://api.microlink.io/?url=${encodeURIComponent(l.prototype_url)}&screenshot=true&meta=false&embed=screenshot.url" alt="превью"
+             onerror="this.style.display='none'">
+        <div><a href="${esc(l.prototype_url)}" target="_blank" rel="noopener">🔗 ${esc(l.prototype_url)}</a></div>
+      </div>`:'';
+    const edits=(l.edits&&l.edits.length)?`<div class="edits"><b style="color:var(--dim);font-size:13px;font-family:var(--pixel)">ПРАВКИ/СООБЩЕНИЯ:</b>`+
+      l.edits.map(e=>`<div class="e">${clock(e.ts)} — ${esc(e.transcript||e.text||'('+e.kind+')')}</div>`).join('')+`</div>`:'';
+    const hist=(l.history&&l.history.length)?`<div class="edits">`+l.history.map(h=>`<div class="e" style="color:var(--dim)">${h.at?clock(h.at):''} → ${esc(h.s||h.status||'')}</div>`).join('')+`</div>`:'';
+    return `<div class="lead">
+      <div class="lh"><b>${esc(l.name)}</b><span class="st ${stc}">${esc(l.status)}</span></div>
+      ${l.profile_url?`<div style="font-size:14px;margin-top:3px"><a href="${esc(l.profile_url)}" target="_blank" rel="noopener">профиль</a> · ${esc(l.niche||'—')}</div>`:''}
+      ${proto}${edits}${hist}
+    </div>`;
+  }).join('');
+}
+
+function card(a){
+  const lvl=a.level||1;const need=xpForLevel(lvl+1);const base=xpForLevel(lvl);
+  const pct=Math.max(0,Math.min(100,Math.round(((a.xp-base)/Math.max(1,need-base))*100)));
+  const open=openState[a.chat_id]||'feed';
+  return `<div class="panel card" data-chat="${a.chat_id}">
+    <div class="hd">
+      <img class="ava" src="${ava(a.name)}" alt="">
+      <div class="who">
+        <div class="nm">${esc(a.name)}</div>
+        <div class="meta"><span class="dot ${a.online?'on':'off'}"></span>${a.online?'онлайн':(a.last_active?tago(a.last_active):'нет активности')}${a.niche?' · '+esc(a.niche):''}</div>
+        <div style="margin-top:5px"><span class="badge ${a.trust==='trusted'?'trusted':'new'}">${a.trust==='trusted'?'✓ TRUSTED':'NEW'}</span><span class="lvl">LVL ${lvl} · ${a.xp} XP</span></div>
+        <div class="xpbar"><i style="width:${pct}%"></i></div>
+      </div>
+    </div>
+    ${a.current?`<div class="cur">сейчас: <b>${esc(a.current.name)}</b> — ${esc(a.current.status)}</div>`:''}
+    <div class="stat">
+      <span><b>${a.today.taken}</b> взял</span>
+      <span><b>${a.today.contacted}</b> написал</span>
+      <span><b>${a.today.built}</b> прототип</span>
+      <span><b>${a.today.sold}</b> продал</span>
+      <span style="color:var(--dim)">за сегодня</span>
+    </div>
+    <div class="tabs">
+      <div class="tab ${open==='feed'?'active':''}" data-tab="feed">ЛЕНТА (${(a.timeline||[]).length})</div>
+      <div class="tab ${open==='leads'?'active':''}" data-tab="leads">ЛИДЫ (${(a.leads||[]).length})</div>
+    </div>
+    <div class="pane feed-pane ${open==='feed'?'show':''}">${feedHtml(a.timeline)}</div>
+    <div class="pane leads-pane ${open==='leads'?'show':''}">${leadsHtml(a.leads)}</div>
+  </div>`;
+}
+
+function wire(){
+  document.querySelectorAll('.card').forEach(card=>{
+    const chat=card.dataset.chat;
+    card.querySelectorAll('.tab').forEach(t=>t.onclick=()=>{
+      const which=t.dataset.tab;openState[chat]=which;
+      card.querySelectorAll('.tab').forEach(x=>x.classList.toggle('active',x.dataset.tab===which));
+      card.querySelector('.feed-pane').classList.toggle('show',which==='feed');
+      card.querySelector('.leads-pane').classList.toggle('show',which==='leads');
+    });
+  });
+  // lazy media via IntersectionObserver — резолвим только видимые (не бомбим getFile)
+  const io=new IntersectionObserver((ents,obs)=>{
+    ents.forEach(async e=>{
+      if(!e.isIntersecting)return;const el=e.target;obs.unobserve(el);
+      if(el.tagName==='AUDIO'){const u=await mediaUrl(el.dataset.aid);if(u)el.src=u;}
+      else{const u=await mediaUrl(el.dataset.pid);if(u){el.src=u;el.onclick=()=>window.open(u,'_blank');}}
+    });
+  },{rootMargin:'120px'});
+  document.querySelectorAll('audio[data-aid]').forEach(a=>{if(a.dataset.aid)io.observe(a);});
+  document.querySelectorAll('img.ph[data-pid]').forEach(i=>{if(i.dataset.pid)io.observe(i);});
+}
+
+async function load(){
+  if(!TOKEN){document.getElementById('root').innerHTML=`<div class="err">НЕТ ДОСТУПА — открой ссылку с токеном (?t=…)</div>`;return;}
+  try{
+    const r=await fetch(API,{headers:{'x-notify-secret':TOKEN}});
+    if(r.status===401){document.getElementById('root').innerHTML=`<div class="err">НЕВЕРНЫЙ ТОКЕН (401)</div>`;return;}
+    const d=await r.json();
+    if(!d.ok)throw new Error(d.error||'bad data');
+    const sorted=[...d.assistants].sort((a,b)=>(b.online-a.online)||(b.xp-a.xp));
+    document.getElementById('root').innerHTML=
+      leaderboard(d.leaderboard)+
+      `<div class="grid">${sorted.map(card).join('')}</div>`;
+    wire();
+    document.getElementById('refresh').textContent='обновлено '+new Date().toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+  }catch(e){
+    document.getElementById('root').innerHTML=`<div class="err">ОШИБКА: ${esc(e.message)}</div>`;
+  }
+}
+load();
+setInterval(load,30000);
+</script>
+</body>
+</html>
