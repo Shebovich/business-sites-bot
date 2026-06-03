@@ -257,6 +257,32 @@ export default async function handler(req, res) {
     } catch (e) { res.statusCode = 500; res.end(JSON.stringify({ ok: false, error: e.message })); return; }
   }
 
+  // ?webhookinfo=1 — здоровье доставки апдейтов от Telegram (#226 start-session verify).
+  // Owner-only. pending_update_count>0 или last_error_message != null = сообщения/голос НЕ
+  // доходят до бота (даже если getMe ok и ключи Gemini живы). Это то, что надо проверять
+  // на старте сессии, а не только «бот отвечает 200».
+  if (req.url?.includes('webhookinfo=1')) {
+    const SECRET = (process.env.CLAUDE_NOTIFY_SECRET || '').trim();
+    const t = req.headers['x-notify-secret'] || (req.url.match(/[?&]t=([^&]+)/) || [])[1];
+    if (!SECRET || t !== SECRET) { res.statusCode = 401; res.end(JSON.stringify({ ok: false, error: 'unauthorized' })); return; }
+    try {
+      const r = await fetch(`https://api.telegram.org/bot${token}/getWebhookInfo`);
+      const j = await r.json();
+      const w = j.result || {};
+      const healthy = !!w.url && (w.pending_update_count || 0) === 0 && !w.last_error_message;
+      res.statusCode = 200; res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({
+        ok: true, healthy,
+        url_set: !!w.url,
+        pending_update_count: w.pending_update_count || 0,
+        last_error_message: w.last_error_message || null,
+        last_error_date: w.last_error_date || null,
+        max_connections: w.max_connections || null,
+        allowed_updates: w.allowed_updates || null,
+      }, null, 2)); return;
+    } catch (e) { res.statusCode = 500; res.end(JSON.stringify({ ok: false, error: e.message })); return; }
+  }
+
   // Identify bot via getMe so мы знаем КАКОМУ именно боту owner должен писать /start.
   let botInfo = null;
   let getMeError = null;
